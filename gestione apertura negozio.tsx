@@ -1083,7 +1083,7 @@ export default function App() {
     </div>
   );
 
-  if (!session) return <LoginScreen />;
+  if (!session || !session.user) return <LoginScreen />;
 
   return (
     <div style={{ minHeight:"100vh", background:"#0a0f1e", color:"#e2e8f0", fontFamily:"'Inter',system-ui,sans-serif" }}>
