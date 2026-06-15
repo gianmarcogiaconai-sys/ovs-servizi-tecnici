@@ -1,4 +1,10 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+// ── SUPABASE ──────────────────────────────────────────────────────────────────
+const SUPABASE_URL = "https://senygjjmynyyljetrylh.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNlbnlnampteW55eWxqZXRyeWxoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE1NDQ4ODMsImV4cCI6MjA5NzEyMDg4M30.QDiY125PiPojVquV9LcdbfCJgBINfHvUu2s10MxrQDo";
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ── DATA ──────────────────────────────────────────────────────────────────────
 
@@ -1046,6 +1052,19 @@ const TABS = [
 
 export default function App() {
   const [tab, setTab] = useState("workflow");
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setAuthLoading(false);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
 
   // carica PDF.js da CDN
   React.useEffect(() => {
@@ -1055,6 +1074,16 @@ export default function App() {
       document.head.appendChild(script);
     }
   }, []);
+
+  const handleLogout = async () => { await supabase.auth.signOut(); };
+
+  if (authLoading) return (
+    <div style={{ minHeight:"100vh", background:"#0a0f1e", display:"flex", alignItems:"center", justifyContent:"center", color:"#7dd3fc", fontSize:"1rem" }}>
+      Caricamento…
+    </div>
+  );
+
+  if (!session || !session.user) return <LoginScreen />;
 
   return (
     <div style={{ minHeight:"100vh", background:"#0a0f1e", color:"#e2e8f0", fontFamily:"'Inter',system-ui,sans-serif" }}>
@@ -1067,6 +1096,9 @@ export default function App() {
               <div style={{ fontWeight:800, fontSize:"1.15rem", letterSpacing:"-0.01em", color:"#f1f5f9" }}>Gestione Apertura Punti Vendita</div>
               <div style={{ color:"#64748b", fontSize:"0.78rem" }}>OVS / UPIM — Servizi Tecnici</div>
             </div>
+          <button onClick={handleLogout} style={{ marginLeft:"auto", background:"#1e293b", color:"#94a3b8", border:"1px solid #334155", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:"0.78rem" }}>
+              🚪 Esci
+            </button>
           </div>
           <div style={{ display:"flex", gap:2, overflowX:"auto" }}>
             {TABS.map(t=>(
@@ -1087,6 +1119,58 @@ export default function App() {
         {tab==="budget"   && <TabBudget />}
         {tab==="ai"       && <TabAnalisiAI />}
         {tab==="pdf"      && <TabEditorPDF />}
+      </div>
+    </div>
+  );
+}
+
+// ── LOGIN COMPONENT ───────────────────────────────────────────────────────────
+function LoginScreen({ onLogin }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleLogin = async () => {
+    if (!email || !password) { setError("Inserisci email e password."); return; }
+    setLoading(true);
+    setError("");
+    const { error: err } = await supabase.auth.signInWithPassword({ email, password });
+    if (err) setError("Credenziali non valide. Riprova.");
+    else onLogin();
+    setLoading(false);
+  };
+
+  const inp = { background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"10px 14px", width:"100%", outline:"none", fontSize:"0.95rem", boxSizing:"border-box" };
+
+  return (
+    <div style={{ minHeight:"100vh", background:"#0a0f1e", display:"flex", alignItems:"center", justifyContent:"center" }}>
+      <div style={{ background:"#1e293b", border:"1px solid #1e3a5f", borderRadius:16, padding:40, width:"100%", maxWidth:380 }}>
+        <div style={{ textAlign:"center", marginBottom:28 }}>
+          <div style={{ width:56, height:56, background:"linear-gradient(135deg,#3b82f6,#06b6d4)", borderRadius:14, display:"flex", alignItems:"center", justifyContent:"center", fontSize:"1.6rem", margin:"0 auto 14px" }}>🏗</div>
+          <div style={{ color:"#f1f5f9", fontWeight:800, fontSize:"1.2rem" }}>Gestione Aperture</div>
+          <div style={{ color:"#64748b", fontSize:"0.82rem", marginTop:4 }}>OVS / UPIM — Servizi Tecnici</div>
+        </div>
+
+        <div style={{ marginBottom:14 }}>
+          <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:5 }}>EMAIL</label>
+          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="la-tua@email.com" style={inp} onKeyDown={e=>e.key==="Enter"&&handleLogin()} />
+        </div>
+        <div style={{ marginBottom:20 }}>
+          <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:5 }}>PASSWORD</label>
+          <input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="••••••••" style={inp} onKeyDown={e=>e.key==="Enter"&&handleLogin()} />
+        </div>
+
+        {error && <div style={{ background:"#450a0a", border:"1px solid #ef4444", borderRadius:8, padding:"8px 12px", marginBottom:14, color:"#fca5a5", fontSize:"0.82rem" }}>{error}</div>}
+
+        <button onClick={handleLogin} disabled={loading}
+          style={{ width:"100%", background: loading?"#1e293b":"linear-gradient(135deg,#3b82f6,#06b6d4)", color: loading?"#475569":"#fff", border:"none", borderRadius:10, padding:"12px", fontWeight:700, fontSize:"0.95rem", cursor: loading?"not-allowed":"pointer" }}>
+          {loading ? "Accesso in corso…" : "Accedi"}
+        </button>
+
+        <div style={{ color:"#475569", fontSize:"0.75rem", textAlign:"center", marginTop:16 }}>
+          Accesso riservato al personale autorizzato OVS
+        </div>
       </div>
     </div>
   );
