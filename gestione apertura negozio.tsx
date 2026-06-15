@@ -1050,8 +1050,21 @@ const TABS = [
   { id:"pdf",      label:"📝 Editor PDF" },
 ];
 
+export default function App() {
+  const [tab, setTab] = useState("workflow");
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
-
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setAuthLoading(false);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
 
   // carica PDF.js da CDN
   React.useEffect(() => {
@@ -1061,6 +1074,16 @@ const TABS = [
       document.head.appendChild(script);
     }
   }, []);
+
+  const handleLogout = async () => { await supabase.auth.signOut(); };
+
+  if (authLoading) return (
+    <div style={{ minHeight:"100vh", background:"#0a0f1e", display:"flex", alignItems:"center", justifyContent:"center", color:"#7dd3fc", fontSize:"1rem" }}>
+      Caricamento…
+    </div>
+  );
+
+  if (!session) return <LoginScreen />;
 
   return (
     <div style={{ minHeight:"100vh", background:"#0a0f1e", color:"#e2e8f0", fontFamily:"'Inter',system-ui,sans-serif" }}>
