@@ -6,6 +6,176 @@ const SUPABASE_URL = "https://senygjjmynyyljetrylh.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNlbnlnampteW55eWxqZXRyeWxoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE1NDQ4ODMsImV4cCI6MjA5NzEyMDg4M30.QDiY125PiPojVquV9LcdbfCJgBINfHvUu2s10MxrQDo";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// ── GOOGLE DRIVE ──────────────────────────────────────────────────────────────
+// Integrazione OAuth con Google Identity Services per creare cartelle e caricare
+// file direttamente sul Drive personale dell'utente collegato all'app.
+const GOOGLE_CLIENT_ID = "68065169766-cfec98ppm2f5dnqu7pgvgkb0necor593.apps.googleusercontent.com";
+const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+const DRIVE_TOKEN_STORAGE = "ovs_drive_token";
+
+// Struttura archivio condivisa: usata sia per la creazione cartelle su Drive
+// sia per la classificazione AI nel tab Documenti (vedi STRUTTURA_ARCHIVIO sotto).
+const SOTTOCARTELLE_COMMESSA = [
+  "DOC INIZIALE/DOC FONDAMENTALI",
+  "DOC INIZIALE/DOC ACCESSORI",
+  "DOC INIZIALE/IMMOBILIARE/CORRISPONDENZA IMMOBILIARE",
+  "DOC INIZIALE/IMMOBILIARE/CONTRATTO",
+  "PROGETTO SD",
+  "PROGETTI IMPIANTI/MECCANICO",
+  "PROGETTI IMPIANTI/ELETTRICO",
+  "PROGETTI IMPIANTI/VVF",
+  "PROGETTI ST",
+  "COMPUTI",
+  "CONTABILITA'",
+  "PRATICHE EDILIZIE/INIZIO LAVORI",
+  "PRATICHE EDILIZIE/FINE LAVORI",
+  "PRATICHE INSEGNE",
+  "SOPRALLUOGHI/REPORT",
+  "FOTO/FOTO INIZIALI",
+  "FOTO/FOTO CANTIERE",
+  "FOTO/FOTO APERTURA",
+];
+
+const getStoredDriveToken = () => {
+  try {
+    const raw = localStorage.getItem(DRIVE_TOKEN_STORAGE);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed.expiresAt && Date.now() > parsed.expiresAt) return null;
+    return parsed.token;
+  } catch { return null; }
+};
+const setStoredDriveToken = (token, expiresInSeconds) => {
+  try {
+    localStorage.setItem(DRIVE_TOKEN_STORAGE, JSON.stringify({
+      token,
+      expiresAt: Date.now() + (expiresInSeconds - 60) * 1000, // margine di sicurezza di 60s
+    }));
+  } catch {}
+};
+const clearStoredDriveToken = () => { try { localStorage.removeItem(DRIVE_TOKEN_STORAGE); } catch {} };
+
+const loadGoogleIdentityScript = () => new Promise((resolve, reject) => {
+  if (window.google?.accounts?.oauth2) { resolve(); return; }
+  const script = document.createElement("script");
+  script.src = "https://accounts.google.com/gsi/client";
+  script.onload = () => resolve();
+  script.onerror = () => reject(new Error("Impossibile caricare Google Identity Services"));
+  document.head.appendChild(script);
+});
+
+// Richiede un token Drive: usa quello salvato se ancora valido, altrimenti
+// apre il popup di login Google e ne richiede uno nuovo.
+const richiediTokenDrive = () => new Promise(async (resolve, reject) => {
+  const cached = getStoredDriveToken();
+  if (cached) { resolve(cached); return; }
+
+  try {
+    await loadGoogleIdentityScript();
+  } catch (e) { reject(e); return; }
+
+  const client = window.google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: DRIVE_SCOPE,
+    callback: (response) => {
+      if (response.error) { reject(new Error("Accesso a Google Drive negato o annullato.")); return; }
+      setStoredDriveToken(response.access_token, response.expires_in || 3600);
+      resolve(response.access_token);
+    },
+  });
+  client.requestAccessToken();
+});
+
+const driveFetch = async (url, options = {}) => {
+  const token = await richiediTokenDrive();
+  const res = await fetch(url, {
+    ...options,
+    headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) {
+    // token scaduto o revocato: lo scartiamo e propaghiamo l'errore per un nuovo tentativo
+    clearStoredDriveToken();
+    throw new Error("Sessione Google Drive scaduta, riprova.");
+  }
+  return res;
+};
+
+const creaCartellaDrive = async (nome, parentId = null) => {
+  const metadata = {
+    name: nome,
+    mimeType: "application/vnd.google-apps.folder",
+    ...(parentId ? { parents: [parentId] } : {}),
+  };
+  const res = await driveFetch("https://www.googleapis.com/drive/v3/files", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(metadata),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  return data.id;
+};
+
+// Crea la cartella della commessa con dentro tutte le sottocartelle annidate
+// definite in SOTTOCARTELLE_COMMESSA. Ritorna l'id della cartella radice.
+const creaStrutturaCommessaSuDrive = async (nomeCommessa) => {
+  const rootId = await creaCartellaDrive(nomeCommessa);
+  const cache = { "": rootId }; // path -> id, "" = radice
+
+  for (const percorso of SOTTOCARTELLE_COMMESSA) {
+    const parti = percorso.split("/");
+    let pathCorrente = "";
+    for (const parte of parti) {
+      const pathPadre = pathCorrente;
+      pathCorrente = pathCorrente ? `${pathCorrente}/${parte}` : parte;
+      if (cache[pathCorrente]) continue;
+      const idPadre = cache[pathPadre];
+      const idNuovo = await creaCartellaDrive(parte, idPadre);
+      cache[pathCorrente] = idNuovo;
+    }
+  }
+  return { rootId, mappaCartelle: cache };
+};
+
+// Carica un file in una cartella Drive specifica (upload multipart semplice)
+const caricaFileSuDrive = async (file, folderId) => {
+  const metadata = { name: file.name, parents: [folderId] };
+  const form = new FormData();
+  form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
+  form.append("file", file);
+
+  const res = await driveFetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
+    method: "POST",
+    body: form,
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  return data.id;
+};
+
+// Trova l'id di una sottocartella esistente cercando una singola cartella
+// figlia per nome, dato l'id della cartella padre.
+const trovaSottocartella = async (nome, parentId) => {
+  const query = encodeURIComponent(`name = '${nome.replace(/'/g, "\\'")}' and '${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
+  const res = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  return data.files?.[0]?.id || null;
+};
+
+// Naviga dalla cartella radice della commessa fino alla sottocartella indicata
+// dal percorso (es. "PROGETTI IMPIANTI/ELETTRICO"), seguendo i nomi un livello alla volta.
+const trovaIdSottocartellaDaPercorso = async (rootId, percorso) => {
+  const parti = percorso.split("/");
+  let idCorrente = rootId;
+  for (const parte of parti) {
+    const idTrovato = await trovaSottocartella(parte, idCorrente);
+    if (!idTrovato) throw new Error(`Sottocartella "${parte}" non trovata su Drive — la struttura potrebbe non essere stata creata correttamente.`);
+    idCorrente = idTrovato;
+  }
+  return idCorrente;
+};
+
 // ── DATA ──────────────────────────────────────────────────────────────────────
 
 const FASI = ["IPOTESI", "DEFINIZIONE PROGETTO", "INIZIO ATTIVITA CANTIERE", "ATTIVITA' CANTIERE", "RACCOLTA CONTABILITA' FINALE", "RACCOLTA DOCUMENTI"];
@@ -405,13 +575,100 @@ function TabBudget() {
   );
 }
 
+const FORM_VUOTO = { id:null, nome:"", brand:"OVS", responsabile:"", tecnico:"", periodo:"", indirizzo:"", citta:"", mq:0, note:"", drive_folder_id:null };
+
 function TabScheda() {
-  const [form, setForm] = useState({ nome:"", brand:"OVS", responsabile:"", tecnico:"", periodo:"", indirizzo:"", citta:"", mq:0, note:"" });
+  const [commesse, setCommesse] = useState([]);
+  const [caricamentoLista, setCaricamentoLista] = useState(true);
+  const [form, setForm] = useState(FORM_VUOTO);
+  const [salvataggio, setSalvataggio] = useState("idle"); // idle | saving | saved | error
+  const [erroreSalvataggio, setErroreSalvataggio] = useState("");
+  const [driveStato, setDriveStato] = useState("idle"); // idle | creating | done | error
+  const [erroreDrive, setErroreDrive] = useState("");
+
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
   const inpStyle = { background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.9rem" };
+
+  const caricaCommesse = async () => {
+    setCaricamentoLista(true);
+    const { data, error } = await supabase.from("commesse").select("*").order("created_at", { ascending:false });
+    if (!error && data) setCommesse(data);
+    setCaricamentoLista(false);
+  };
+
+  useEffect(() => { caricaCommesse(); }, []);
+
+  const selezionaCommessa = (id) => {
+    if (!id) { setForm(FORM_VUOTO); return; }
+    const c = commesse.find(x => x.id === id);
+    if (c) setForm({ ...FORM_VUOTO, ...c });
+  };
+
+  const salva = async () => {
+    if (!form.nome.trim()) { setErroreSalvataggio("Il nome del negozio è obbligatorio."); setSalvataggio("error"); return; }
+    setSalvataggio("saving");
+    setErroreSalvataggio("");
+
+    const payload = {
+      nome: form.nome, brand: form.brand, responsabile: form.responsabile, tecnico: form.tecnico,
+      periodo: form.periodo, indirizzo: form.indirizzo, citta: form.citta, mq: form.mq || null, note: form.note,
+      updated_at: new Date().toISOString(),
+    };
+
+    try {
+      if (form.id) {
+        const { error } = await supabase.from("commesse").update(payload).eq("id", form.id);
+        if (error) throw error;
+      } else {
+        const { data, error } = await supabase.from("commesse").insert(payload).select().single();
+        if (error) throw error;
+        setForm(f => ({ ...f, id: data.id }));
+      }
+      setSalvataggio("saved");
+      await caricaCommesse();
+      setTimeout(() => setSalvataggio("idle"), 2500);
+    } catch (e) {
+      setErroreSalvataggio(e.message || "Errore durante il salvataggio.");
+      setSalvataggio("error");
+    }
+  };
+
+  const creaCartellaDriveCommessa = async () => {
+    if (!form.id) { setErroreDrive("Salva prima la scheda negozio."); setDriveStato("error"); return; }
+    setDriveStato("creating");
+    setErroreDrive("");
+    try {
+      const { rootId } = await creaStrutturaCommessaSuDrive(form.nome);
+      const { error } = await supabase.from("commesse").update({ drive_folder_id: rootId }).eq("id", form.id);
+      if (error) throw error;
+      setForm(f => ({ ...f, drive_folder_id: rootId }));
+      setDriveStato("done");
+      await caricaCommesse();
+    } catch (e) {
+      setErroreDrive(e.message || "Errore durante la creazione su Drive.");
+      setDriveStato("error");
+    }
+  };
+
   return (
-    <div style={{ maxWidth:620 }}>
-      <div style={{ color:"#64748b", fontSize:"0.82rem", marginBottom:18 }}>Compila la scheda del nuovo negozio. I dati saranno visibili nel pannello di riepilogo.</div>
+    <div style={{ maxWidth:640 }}>
+      {/* selettore commessa esistente */}
+      <div style={{ marginBottom:20 }}>
+        <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Commessa</label>
+        <div style={{ display:"flex", gap:8 }}>
+          <select
+            value={form.id || ""}
+            onChange={e => selezionaCommessa(e.target.value || null)}
+            style={{ ...inpStyle, flex:1, cursor:"pointer" }}
+          >
+            <option value="">➕ Nuova commessa</option>
+            {commesse.map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}
+          </select>
+        </div>
+        {caricamentoLista && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Caricamento elenco commesse…</div>}
+      </div>
+
+      <div style={{ color:"#64748b", fontSize:"0.82rem", marginBottom:18 }}>Compila la scheda del negozio. Salvando, la commessa resta disponibile anche negli altri tab e dopo aver chiuso l'app.</div>
       {[
         { label:"Nome negozio / ID commessa", key:"nome" },
         { label:"Brand", key:"brand", type:"select", opts:["OVS","UPIM"] },
@@ -432,10 +689,41 @@ function TabScheda() {
           }
         </div>
       ))}
-      <div style={{ marginBottom:14 }}>
+      <div style={{ marginBottom:18 }}>
         <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Note / Peculiarità</label>
         <textarea value={form.note} onChange={e=>set("note",e.target.value)} rows={3} style={{ ...inpStyle, resize:"vertical" }} />
       </div>
+
+      {/* salva */}
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:24 }}>
+        <button onClick={salva} disabled={salvataggio==="saving"}
+          style={{ background: salvataggio==="saved"?"#14532d":"#1d4ed8", color:"#fff", border:"none", borderRadius:8, padding:"10px 20px", cursor:"pointer", fontWeight:700, fontSize:"0.88rem" }}>
+          {salvataggio==="saving" ? "Salvataggio…" : salvataggio==="saved" ? "✓ Salvato" : form.id ? "Salva modifiche" : "Salva nuova commessa"}
+        </button>
+        {salvataggio==="error" && <span style={{ color:"#fca5a5", fontSize:"0.8rem" }}>{erroreSalvataggio}</span>}
+      </div>
+
+      {/* drive */}
+      {form.id && (
+        <div style={{ background:"#0f172a", border:"1px solid #1e3a5f", borderRadius:12, padding:18, marginBottom:20 }}>
+          <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.92rem", marginBottom:8 }}>📁 Archivio Google Drive</div>
+          {form.drive_folder_id ? (
+            <div style={{ color:"#86efac", fontSize:"0.82rem" }}>
+              ✓ Cartella creata su Drive con tutte le sottocartelle pronte.{" "}
+              <a href={`https://drive.google.com/drive/folders/${form.drive_folder_id}`} target="_blank" rel="noreferrer" style={{ color:"#7dd3fc" }}>Apri su Drive →</a>
+            </div>
+          ) : (
+            <>
+              <div style={{ color:"#64748b", fontSize:"0.8rem", marginBottom:10 }}>Crea la cartella "{form.nome}" sul tuo Drive con le 18 sottocartelle dell'archivio già pronte.</div>
+              <button onClick={creaCartellaDriveCommessa} disabled={driveStato==="creating"}
+                style={{ background:"#1d4ed8", color:"#fff", border:"none", borderRadius:8, padding:"8px 16px", cursor:"pointer", fontWeight:700, fontSize:"0.82rem" }}>
+                {driveStato==="creating" ? "Creazione cartelle in corso…" : "Crea cartella su Drive"}
+              </button>
+              {driveStato==="error" && <div style={{ color:"#fca5a5", fontSize:"0.78rem", marginTop:8 }}>{erroreDrive}</div>}
+            </>
+          )}
+        </div>
+      )}
 
       {/* riepilogo */}
       {form.nome && (
@@ -1085,10 +1373,23 @@ const ARCHIVIO_STATUS_STYLE = {
 function TabDocumenti() {
   const [apiKey, setApiKey] = useState(() => getStoredApiKey());
   const [apiKeySaved, setApiKeySaved] = useState(() => !!getStoredApiKey());
-  const [items, setItems] = useState([]); // { id, file, status, cartella, motivazione, riassunto, datiChiave, azioni, errore }
+  const [items, setItems] = useState([]); // { id, file, status, cartella, motivazione, riassunto, datiChiave, azioni, errore, driveStato, mappaCartelle }
   const [selectedId, setSelectedId] = useState(null);
+  const [commesse, setCommesse] = useState([]);
+  const [commessaId, setCommessaId] = useState("");
+  const [caricamentoCommesse, setCaricamentoCommesse] = useState(true);
 
   const inpStyle = { background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.88rem" };
+
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase.from("commesse").select("*").order("created_at", { ascending:false });
+      if (!error && data) setCommesse(data);
+      setCaricamentoCommesse(false);
+    })();
+  }, []);
+
+  const commessaSelezionata = commesse.find(c => c.id === commessaId);
 
   const toBase64 = (file) => new Promise((res, rej) => {
     const r = new FileReader();
@@ -1102,6 +1403,36 @@ function TabDocumenti() {
     const ext = file.name.split(".").pop().toLowerCase();
     const map = { pdf:"application/pdf", jpg:"image/jpeg", jpeg:"image/jpeg", png:"image/png", webp:"image/webp", dwg:"application/octet-stream" };
     return map[ext] || "application/octet-stream";
+  };
+
+  const isSpreadsheet = (file) => {
+    const ext = file.name.split(".").pop().toLowerCase();
+    return ["xls", "xlsx", "csv"].includes(ext);
+  };
+
+  // Gemini non accetta file Excel/CSV come allegato binario: li leggiamo
+  // noi nel browser con SheetJS e ne mandiamo il contenuto come testo.
+  const loadSheetJS = () => new Promise((resolve, reject) => {
+    if (window.XLSX) { resolve(window.XLSX); return; }
+    const script = document.createElement("script");
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    script.onload = () => resolve(window.XLSX);
+    script.onerror = () => reject(new Error("Impossibile caricare il lettore Excel"));
+    document.head.appendChild(script);
+  });
+
+  const estraiTestoSpreadsheet = async (file) => {
+    const XLSX = await loadSheetJS();
+    const buffer = await file.arrayBuffer();
+    const wb = XLSX.read(buffer, { type: "array" });
+    let testo = "";
+    wb.SheetNames.forEach(nome => {
+      const sheet = wb.Sheets[nome];
+      const csv = XLSX.utils.sheet_to_csv(sheet);
+      testo += `--- FOGLIO: ${nome} ---\n${csv}\n\n`;
+    });
+    // Limite di sicurezza per non sovraccaricare la richiesta su file molto grandi
+    return testo.slice(0, 30000);
   };
 
   const handleFiles = (e) => {
@@ -1144,9 +1475,15 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
   "azioni_richieste": "cosa bisogna fare con questo documento, se richiede un'azione (se nessuna azione scrivi 'Nessuna azione richiesta')"
 }`;
 
-      const b64 = await toBase64(item.file);
-      const mime = getMimeType(item.file);
-      const parts = [{ text: promptText }, { inline_data: { mime_type: mime, data: b64 } }];
+      let parts;
+      if (isSpreadsheet(item.file)) {
+        const contenutoTestuale = await estraiTestoSpreadsheet(item.file);
+        parts = [{ text: promptText + `\n\nContenuto del file (estratto come tabella):\n${contenutoTestuale}` }];
+      } else {
+        const b64 = await toBase64(item.file);
+        const mime = getMimeType(item.file);
+        parts = [{ text: promptText }, { inline_data: { mime_type: mime, data: b64 } }];
+      }
 
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
@@ -1170,9 +1507,25 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
         riassunto: parsed.riassunto || "",
         datiChiave: parsed.dati_chiave || "",
         azioni: parsed.azioni_richieste || "",
+        driveStato: "idle",
       } : i));
     } catch (e) {
       setItems(prev => prev.map(i => i.id === item.id ? { ...i, status:"error", errore: e.message } : i));
+    }
+  };
+
+  const caricaSuDrive = async (item) => {
+    if (!commessaSelezionata?.drive_folder_id) {
+      setItems(prev => prev.map(i => i.id === item.id ? { ...i, driveStato:"error", driveErrore:"Seleziona una commessa con cartella Drive già creata." } : i));
+      return;
+    }
+    setItems(prev => prev.map(i => i.id === item.id ? { ...i, driveStato:"uploading" } : i));
+    try {
+      const idSottocartella = await trovaIdSottocartellaDaPercorso(commessaSelezionata.drive_folder_id, item.cartella);
+      await caricaFileSuDrive(item.file, idSottocartella);
+      setItems(prev => prev.map(i => i.id === item.id ? { ...i, driveStato:"done" } : i));
+    } catch (e) {
+      setItems(prev => prev.map(i => i.id === item.id ? { ...i, driveStato:"error", driveErrore: e.message } : i));
     }
   };
 
@@ -1200,12 +1553,26 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
         {!apiKeySaved && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:6 }}>Ottieni la chiave gratuita su aistudio.google.com → Get API Key. Verrà salvata in questo browser e usata automaticamente in tutti i tab.</div>}
       </div>
 
+      {/* selettore commessa */}
+      <div style={{ marginBottom:20 }}>
+        <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Commessa di destinazione</label>
+        <select value={commessaId} onChange={e => setCommessaId(e.target.value)} style={{ ...inpStyle, cursor:"pointer" }}>
+          <option value="">Seleziona una commessa…</option>
+          {commesse.map(c => <option key={c.id} value={c.id}>{c.nome}{!c.drive_folder_id ? " (cartella Drive non creata)" : ""}</option>)}
+        </select>
+        {caricamentoCommesse && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Caricamento elenco commesse…</div>}
+        {!caricamentoCommesse && commesse.length === 0 && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Nessuna commessa trovata: creala prima nella Scheda Negozio.</div>}
+        {commessaSelezionata && !commessaSelezionata.drive_folder_id && (
+          <div style={{ color:"#fbbf24", fontSize:"0.75rem", marginTop:4 }}>⚠ Questa commessa non ha ancora una cartella Drive. Crea la struttura dalla Scheda Negozio prima di caricare i documenti.</div>
+        )}
+      </div>
+
       {/* upload */}
       <label style={{ display:"block", background:"#0f172a", border:"2px dashed #334155", borderRadius:12, padding:"28px 16px", textAlign:"center", cursor:"pointer", marginBottom:20 }}>
-        <input type="file" multiple accept="image/*,.pdf" onChange={handleFiles} style={{ display:"none" }} />
+        <input type="file" multiple accept="image/*,.pdf,.xls,.xlsx,.csv" onChange={handleFiles} style={{ display:"none" }} />
         <div style={{ fontSize:"2rem", marginBottom:8 }}>📂</div>
         <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.95rem", marginBottom:4 }}>Carica documenti per l'archivio</div>
-        <div style={{ color:"#64748b", fontSize:"0.8rem" }}>L'AI apre ogni file, lo capisce e suggerisce la cartella giusta — fino a 10 file insieme</div>
+        <div style={{ color:"#64748b", fontSize:"0.8rem" }}>L'AI apre ogni file, lo capisce e suggerisce la cartella giusta — fino a 10 file insieme (immagini, PDF, Excel, CSV)</div>
       </label>
 
       <div style={{ display:"grid", gridTemplateColumns: selected ? "1fr 1.1fr" : "1fr", gap:20 }}>
@@ -1269,9 +1636,22 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
               <div style={{ color:"#fbbf24", fontSize:"0.85rem", lineHeight:1.6 }}>{selected.azioni}</div>
             </div>
 
-            <div style={{ background:"#450a0a22", border:"1px solid #ef444433", borderRadius:8, padding:"8px 12px", marginTop:14, color:"#fca5a5", fontSize:"0.72rem" }}>
-              ⚠ Il salvataggio automatico su Google Drive non è ancora collegato — per ora questa è solo l'anteprima della classificazione.
-            </div>
+            {selected.driveStato === "done" ? (
+              <div style={{ background:"#14532d22", border:"1px solid #22c55e33", borderRadius:8, padding:"10px 14px", marginTop:14, color:"#86efac", fontSize:"0.82rem" }}>
+                ✓ Caricato su Google Drive nella cartella giusta.
+              </div>
+            ) : (
+              <div style={{ marginTop:14 }}>
+                <button
+                  onClick={() => caricaSuDrive(selected)}
+                  disabled={selected.driveStato === "uploading" || !commessaSelezionata?.drive_folder_id}
+                  style={{ background:"#1d4ed8", color:"#fff", border:"none", borderRadius:8, padding:"9px 18px", cursor: (!commessaSelezionata?.drive_folder_id) ? "not-allowed" : "pointer", fontWeight:700, fontSize:"0.84rem", opacity: (!commessaSelezionata?.drive_folder_id) ? 0.5 : 1 }}>
+                  {selected.driveStato === "uploading" ? "Caricamento su Drive…" : "📤 Carica su Google Drive"}
+                </button>
+                {!commessaSelezionata && <div style={{ color:"#64748b", fontSize:"0.72rem", marginTop:6 }}>Seleziona prima una commessa qui sopra.</div>}
+                {selected.driveStato === "error" && <div style={{ color:"#fca5a5", fontSize:"0.75rem", marginTop:6 }}>{selected.driveErrore}</div>}
+              </div>
+            )}
           </div>
         )}
       </div>
