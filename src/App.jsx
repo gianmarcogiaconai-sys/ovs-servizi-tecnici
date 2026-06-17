@@ -36,6 +36,31 @@ const SOTTOCARTELLE_COMMESSA = [
   "FOTO/FOTO APERTURA",
 ];
 
+// Cartelle che, al momento dell'upload, ricevono in più una sottocartella
+// con la data del giorno (es. "2026-06-17") per separare le revisioni nel tempo.
+const CARTELLE_CON_SOTTOCARTELLA_DATA = new Set([
+  "DOC INIZIALE/DOC FONDAMENTALI",
+  "DOC INIZIALE/DOC ACCESSORI",
+  "DOC INIZIALE/IMMOBILIARE/CORRISPONDENZA IMMOBILIARE",
+  "DOC INIZIALE/IMMOBILIARE/CONTRATTO",
+  "PROGETTO SD",
+  "PROGETTI IMPIANTI/MECCANICO",
+  "PROGETTI IMPIANTI/ELETTRICO",
+  "PROGETTI IMPIANTI/VVF",
+  "COMPUTI",
+  "SOPRALLUOGHI/REPORT",
+  "FOTO/FOTO INIZIALI",
+  "FOTO/FOTO CANTIERE",
+  "FOTO/FOTO APERTURA",
+]);
+
+// Formatta la data odierna come "AAAA-MM-GG" per il nome della sottocartella
+const dataDiOggiPerCartella = () => {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+};
+
 const getStoredDriveToken = () => {
   try {
     const raw = localStorage.getItem(DRIVE_TOKEN_STORAGE);
@@ -165,6 +190,8 @@ const trovaSottocartella = async (nome, parentId) => {
 
 // Naviga dalla cartella radice della commessa fino alla sottocartella indicata
 // dal percorso (es. "PROGETTI IMPIANTI/ELETTRICO"), seguendo i nomi un livello alla volta.
+// Se il percorso è tra quelli con sottocartella a data, in più cerca/crea al volo
+// la sottocartella con la data di oggi (creata solo al primo upload del giorno).
 const trovaIdSottocartellaDaPercorso = async (rootId, percorso) => {
   const parti = percorso.split("/");
   let idCorrente = rootId;
@@ -173,6 +200,14 @@ const trovaIdSottocartellaDaPercorso = async (rootId, percorso) => {
     if (!idTrovato) throw new Error(`Sottocartella "${parte}" non trovata su Drive — la struttura potrebbe non essere stata creata correttamente.`);
     idCorrente = idTrovato;
   }
+
+  if (CARTELLE_CON_SOTTOCARTELLA_DATA.has(percorso)) {
+    const nomeData = dataDiOggiPerCartella();
+    let idData = await trovaSottocartella(nomeData, idCorrente);
+    if (!idData) idData = await creaCartellaDrive(nomeData, idCorrente);
+    idCorrente = idData;
+  }
+
   return idCorrente;
 };
 
@@ -1662,7 +1697,7 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
       </div>
 
       <p style={{ color:"#475569", fontSize:"0.75rem", marginTop:16 }}>
-        💡 L'AI legge il contenuto reale del documento (non solo il nome del file) per decidere la cartella più adatta tra le {STRUTTURA_ARCHIVIO.length} disponibili in archivio.
+        💡 L'AI legge il contenuto reale del documento (non solo il nome del file) per decidere la cartella più adatta tra le {STRUTTURA_ARCHIVIO.length} disponibili in archivio. Per computi, progetti, foto, documenti iniziali e sopralluoghi viene creata anche una sottocartella con la data odierna, così le revisioni successive restano separate.
       </p>
     </div>
   );
