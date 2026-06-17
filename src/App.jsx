@@ -453,6 +453,15 @@ function TabScheda() {
   );
 }
 
+// ── GEMINI API KEY — salvata in modo permanente nel browser ────────────────────
+const GEMINI_KEY_STORAGE = "ovs_gemini_api_key";
+const getStoredApiKey = () => {
+  try { return localStorage.getItem(GEMINI_KEY_STORAGE) || ""; } catch { return ""; }
+};
+const setStoredApiKey = (key) => {
+  try { localStorage.setItem(GEMINI_KEY_STORAGE, key); } catch {}
+};
+
 // ── TAB ANALISI AI ────────────────────────────────────────────────────────────
 
 const TIPI_ANALISI = [
@@ -464,8 +473,8 @@ const TIPI_ANALISI = [
 ];
 
 function TabAnalisiAI() {
-  const [apiKey, setApiKey] = useState("");
-  const [apiKeySaved, setApiKeySaved] = useState(false);
+  const [apiKey, setApiKey] = useState(() => getStoredApiKey());
+  const [apiKeySaved, setApiKeySaved] = useState(() => !!getStoredApiKey());
   const [tipoAnalisi, setTipoAnalisi] = useState(TIPI_ANALISI[0].id);
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -561,12 +570,12 @@ function TabAnalisiAI() {
             placeholder="Incolla qui la tua API Key (AIza...)"
             style={{ ...inpStyle, flex:1 }}
           />
-          <button onClick={() => setApiKeySaved(true)}
+          <button onClick={() => { setStoredApiKey(apiKey); setApiKeySaved(true); }}
             style={{ background: apiKeySaved?"#14532d":"#1d4ed8", color: apiKeySaved?"#86efac":"#fff", border:"none", borderRadius:8, padding:"8px 16px", cursor:"pointer", fontWeight:700, fontSize:"0.82rem", whiteSpace:"nowrap" }}>
             {apiKeySaved ? "✓ Salvata" : "Salva"}
           </button>
         </div>
-        {!apiKeySaved && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:6 }}>Ottieni la chiave gratuita su aistudio.google.com → Get API Key</div>}
+        {!apiKeySaved && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:6 }}>Ottieni la chiave gratuita su aistudio.google.com → Get API Key. Verrà salvata in questo browser e usata automaticamente in tutti i tab.</div>}
       </div>
 
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:20 }}>
@@ -1074,8 +1083,8 @@ const ARCHIVIO_STATUS_STYLE = {
 };
 
 function TabDocumenti() {
-  const [apiKey, setApiKey] = useState("");
-  const [apiKeySaved, setApiKeySaved] = useState(false);
+  const [apiKey, setApiKey] = useState(() => getStoredApiKey());
+  const [apiKeySaved, setApiKeySaved] = useState(() => !!getStoredApiKey());
   const [items, setItems] = useState([]); // { id, file, status, cartella, motivazione, riassunto, datiChiave, azioni, errore }
   const [selectedId, setSelectedId] = useState(null);
 
@@ -1183,12 +1192,12 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
             placeholder="Incolla qui la tua API Key (AIza...)"
             style={{ ...inpStyle, flex:1 }}
           />
-          <button onClick={() => setApiKeySaved(true)}
+          <button onClick={() => { setStoredApiKey(apiKey); setApiKeySaved(true); }}
             style={{ background: apiKeySaved?"#14532d":"#1d4ed8", color: apiKeySaved?"#86efac":"#fff", border:"none", borderRadius:8, padding:"8px 16px", cursor:"pointer", fontWeight:700, fontSize:"0.82rem", whiteSpace:"nowrap" }}>
             {apiKeySaved ? "✓ Salvata" : "Salva"}
           </button>
         </div>
-        {!apiKeySaved && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:6 }}>Ottieni la chiave gratuita su aistudio.google.com → Get API Key</div>}
+        {!apiKeySaved && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:6 }}>Ottieni la chiave gratuita su aistudio.google.com → Get API Key. Verrà salvata in questo browser e usata automaticamente in tutti i tab.</div>}
       </div>
 
       {/* upload */}
