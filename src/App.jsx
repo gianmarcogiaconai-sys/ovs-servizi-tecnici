@@ -1348,12 +1348,12 @@ const STRUTTURA_ARCHIVIO = [
   { path:"DOC INIZIALE/IMMOBILIARE/CORRISPONDENZA IMMOBILIARE", desc:"Mail e comunicazioni con l'ufficio immobiliare" },
   { path:"DOC INIZIALE/IMMOBILIARE/CONTRATTO",            desc:"Bozze di contratto e contratto di locazione definitivo" },
   { path:"PROGETTO SD",                                   desc:"Documenti, planimetrie o layout ricevuti da Store Design" },
-  { path:"PROGETTI IMPIANTI/MECCANICO",                   desc:"Progetti e computi dell'impianto meccanico/climatizzazione" },
-  { path:"PROGETTI IMPIANTI/ELETTRICO",                   desc:"Progetti e computi dell'impianto elettrico" },
-  { path:"PROGETTI IMPIANTI/VVF",                         desc:"Progetti impianti ai fini antincendio (sprinkler, rilevazione fumi, idranti)" },
-  { path:"PROGETTI ST",                                   desc:"Eventuali progetti elaborati direttamente dai Servizi Tecnici" },
-  { path:"COMPUTI",                                       desc:"Preventivi ricevuti dai fornitori, computi metrici" },
-  { path:"CONTABILITA'",                                  desc:"Preventivi e consuntivi economici, fatture, SAL, divisi per fornitore" },
+  { path:"PROGETTI IMPIANTI/MECCANICO",                   desc:"SOLO elaborati tecnici di progetto dell'impianto meccanico/climatizzazione, come tavole, relazioni tecniche o schemi. NON includere computi metrici, preventivi o documenti con importi economici: quelli vanno sempre in COMPUTI anche se riguardano l'impianto meccanico." },
+  { path:"PROGETTI IMPIANTI/ELETTRICO",                   desc:"SOLO elaborati tecnici di progetto dell'impianto elettrico, come tavole, relazioni tecniche o schemi. NON includere computi metrici, preventivi o documenti con importi economici: quelli vanno sempre in COMPUTI anche se riguardano l'impianto elettrico." },
+  { path:"PROGETTI IMPIANTI/VVF",                         desc:"SOLO elaborati tecnici di progetto antincendio (sprinkler, rilevazione fumi, idranti). NON includere computi metrici o preventivi con importi: quelli vanno in COMPUTI." },
+  { path:"PROGETTI ST",                                   desc:"Eventuali progetti elaborati direttamente dai Servizi Tecnici (solo elaborati di progetto, non economici)" },
+  { path:"COMPUTI",                                       desc:"QUALSIASI computo metrico estimativo (CME), preventivo di fornitore o documento con importi economici legati a lavori o impianti — meccanico, elettrico, VVF, edile o altro. Riconoscibile da: presenza di voci di costo, importi in euro, totali, elenco prezzi. Questo vale anche se il file riguarda uno specifico impianto: un computo dell'impianto meccanico va qui, non in PROGETTI IMPIANTI." },
+  { path:"CONTABILITA'",                                  desc:"Consuntivi economici, fatture, Stati Avanzamento Lavori (SAL) già fatturati o liquidati, divisi per fornitore — diverso da COMPUTI che riguarda preventivi/computi non ancora a consuntivo" },
   { path:"PRATICHE EDILIZIE/INIZIO LAVORI",               desc:"Pratiche edilizie di inizio cantiere predisposte dal Direttore Lavori (PSC, notifica preliminare, CILA/SCIA)" },
   { path:"PRATICHE EDILIZIE/FINE LAVORI",                 desc:"Pratiche edilizie di fine cantiere predisposte dal DL (fine lavori, collaudi, dichiarazioni)" },
   { path:"PRATICHE INSEGNE",                              desc:"Pratiche e autorizzazioni per insegne e pubblicità esterna, ricevute dal DL" },
@@ -1509,6 +1509,11 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
         azioni: parsed.azioni_richieste || "",
         driveStato: "idle",
       } : i));
+
+      // Upload automatico su Drive se la commessa selezionata ha già la cartella pronta
+      if (commessaSelezionata?.drive_folder_id) {
+        caricaSuDrive({ ...item, cartella: cartellaValida });
+      }
     } catch (e) {
       setItems(prev => prev.map(i => i.id === item.id ? { ...i, status:"error", errore: e.message } : i));
     }
@@ -1572,7 +1577,7 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
         <input type="file" multiple accept="image/*,.pdf,.xls,.xlsx,.csv" onChange={handleFiles} style={{ display:"none" }} />
         <div style={{ fontSize:"2rem", marginBottom:8 }}>📂</div>
         <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.95rem", marginBottom:4 }}>Carica documenti per l'archivio</div>
-        <div style={{ color:"#64748b", fontSize:"0.8rem" }}>L'AI apre ogni file, lo capisce e suggerisce la cartella giusta — fino a 10 file insieme (immagini, PDF, Excel, CSV)</div>
+        <div style={{ color:"#64748b", fontSize:"0.8rem" }}>L'AI apre ogni file, lo classifica e lo carica automaticamente su Drive nella cartella giusta — fino a 10 file insieme (immagini, PDF, Excel, CSV)</div>
       </label>
 
       <div style={{ display:"grid", gridTemplateColumns: selected ? "1fr 1.1fr" : "1fr", gap:20 }}>
