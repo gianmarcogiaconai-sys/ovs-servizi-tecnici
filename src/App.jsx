@@ -1041,6 +1041,239 @@ function TabEditorPDF() {
 
 // ── APP ───────────────────────────────────────────────────────────────────────
 
+// ── TAB DOCUMENTI — ARCHIVIO INTELLIGENTE ───────────────────────────────────────
+
+// Struttura archivio: ogni voce è un percorso completo di cartella + descrizione
+// usata dall'AI per decidere dove va classificato un documento.
+const STRUTTURA_ARCHIVIO = [
+  { path:"DOC INIZIALE/DOC FONDAMENTALI",                 desc:"Documenti della checklist Pratiche Amministrative già previsti dall'app (CPI, DIA VVF, agibilità, catastali, contratti energia, ecc.)" },
+  { path:"DOC INIZIALE/DOC ACCESSORI",                    desc:"Documenti non in checklist, ricevuti da corrispondenze varie, non fondamentali ma utili" },
+  { path:"DOC INIZIALE/IMMOBILIARE/CORRISPONDENZA IMMOBILIARE", desc:"Mail e comunicazioni con l'ufficio immobiliare" },
+  { path:"DOC INIZIALE/IMMOBILIARE/CONTRATTO",            desc:"Bozze di contratto e contratto di locazione definitivo" },
+  { path:"PROGETTO SD",                                   desc:"Documenti, planimetrie o layout ricevuti da Store Design" },
+  { path:"PROGETTI IMPIANTI/MECCANICO",                   desc:"Progetti e computi dell'impianto meccanico/climatizzazione" },
+  { path:"PROGETTI IMPIANTI/ELETTRICO",                   desc:"Progetti e computi dell'impianto elettrico" },
+  { path:"PROGETTI IMPIANTI/VVF",                         desc:"Progetti impianti ai fini antincendio (sprinkler, rilevazione fumi, idranti)" },
+  { path:"PROGETTI ST",                                   desc:"Eventuali progetti elaborati direttamente dai Servizi Tecnici" },
+  { path:"COMPUTI",                                       desc:"Preventivi ricevuti dai fornitori, computi metrici" },
+  { path:"CONTABILITA'",                                  desc:"Preventivi e consuntivi economici, fatture, SAL, divisi per fornitore" },
+  { path:"PRATICHE EDILIZIE/INIZIO LAVORI",               desc:"Pratiche edilizie di inizio cantiere predisposte dal Direttore Lavori (PSC, notifica preliminare, CILA/SCIA)" },
+  { path:"PRATICHE EDILIZIE/FINE LAVORI",                 desc:"Pratiche edilizie di fine cantiere predisposte dal DL (fine lavori, collaudi, dichiarazioni)" },
+  { path:"PRATICHE INSEGNE",                              desc:"Pratiche e autorizzazioni per insegne e pubblicità esterna, ricevute dal DL" },
+  { path:"SOPRALLUOGHI/REPORT",                           desc:"Report generati dall'AI partendo da foto e registrazioni di riunioni di cantiere" },
+  { path:"FOTO/FOTO INIZIALI",                            desc:"Foto del sopralluogo iniziale, locali allo stato di fatto" },
+  { path:"FOTO/FOTO CANTIERE",                            desc:"Foto di avanzamento durante i lavori di cantiere" },
+  { path:"FOTO/FOTO APERTURA",                             desc:"Foto del negozio finito, pronto per l'apertura" },
+];
+
+const ARCHIVIO_STATUS_STYLE = {
+  pending:   { bg:"#1e293b", color:"#94a3b8", label:"In coda" },
+  analyzing: { bg:"#1e3a5f", color:"#7dd3fc", label:"Analisi in corso…" },
+  done:      { bg:"#14532d", color:"#86efac", label:"Classificato" },
+  error:     { bg:"#450a0a", color:"#fca5a5", label:"Errore" },
+};
+
+function TabDocumenti() {
+  const [apiKey, setApiKey] = useState("");
+  const [apiKeySaved, setApiKeySaved] = useState(false);
+  const [items, setItems] = useState([]); // { id, file, status, cartella, motivazione, riassunto, datiChiave, azioni, errore }
+  const [selectedId, setSelectedId] = useState(null);
+
+  const inpStyle = { background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.88rem" };
+
+  const toBase64 = (file) => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(",")[1]);
+    r.onerror = () => rej(new Error("Errore lettura file"));
+    r.readAsDataURL(file);
+  });
+
+  const getMimeType = (file) => {
+    if (file.type) return file.type;
+    const ext = file.name.split(".").pop().toLowerCase();
+    const map = { pdf:"application/pdf", jpg:"image/jpeg", jpeg:"image/jpeg", png:"image/png", webp:"image/webp", dwg:"application/octet-stream" };
+    return map[ext] || "application/octet-stream";
+  };
+
+  const handleFiles = (e) => {
+    const selected = Array.from(e.target.files).slice(0, 10);
+    const nuovi = selected.map(file => ({
+      id: Date.now() + Math.random(),
+      file,
+      status: "pending",
+      cartella: null,
+      motivazione: "",
+      riassunto: "",
+      datiChiave: "",
+      azioni: "",
+      errore: "",
+    }));
+    setItems(prev => [...nuovi, ...prev]);
+    nuovi.forEach(item => classifica(item));
+  };
+
+  const classifica = async (item) => {
+    if (!apiKey) {
+      setItems(prev => prev.map(i => i.id === item.id ? { ...i, status:"error", errore:"Inserisci prima la API Key Gemini." } : i));
+      return;
+    }
+    setItems(prev => prev.map(i => i.id === item.id ? { ...i, status:"analyzing" } : i));
+
+    try {
+      const elencoCartelle = STRUTTURA_ARCHIVIO.map((c, idx) => `${idx + 1}. "${c.path}" — ${c.desc}`).join("\n");
+      const promptText = `Sei un archivista esperto di pratiche edilizie e gestione commesse retail. Apri e analizza il documento allegato (file: "${item.file.name}"). Determina autonomamente di che tipo di documento si tratta guardando il contenuto, non solo il nome del file.
+
+Devi scegliere UNA SOLA cartella di destinazione tra questo elenco esatto (rispondi usando esattamente uno di questi percorsi, copiato identico):
+${elencoCartelle}
+
+Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backtick, con questa struttura esatta:
+{
+  "cartella": "il percorso esatto copiato dall'elenco",
+  "motivazione": "breve spiegazione di massimo 2 frasi sul perché questo documento va in quella cartella",
+  "riassunto": "riassunto del contenuto del documento in 2-3 frasi",
+  "dati_chiave": "eventuali dati importanti trovati: date, importi, nomi, misure (se non ce ne sono scrivi 'Nessun dato rilevante')",
+  "azioni_richieste": "cosa bisogna fare con questo documento, se richiede un'azione (se nessuna azione scrivi 'Nessuna azione richiesta')"
+}`;
+
+      const b64 = await toBase64(item.file);
+      const mime = getMimeType(item.file);
+      const parts = [{ text: promptText }, { inline_data: { mime_type: mime, data: b64 } }];
+
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ parts }] }) }
+      );
+
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+
+      let testo = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      testo = testo.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(testo);
+
+      const cartellaValida = STRUTTURA_ARCHIVIO.find(c => c.path === parsed.cartella)?.path || "DOC INIZIALE/DOC ACCESSORI";
+
+      setItems(prev => prev.map(i => i.id === item.id ? {
+        ...i,
+        status: "done",
+        cartella: cartellaValida,
+        motivazione: parsed.motivazione || "",
+        riassunto: parsed.riassunto || "",
+        datiChiave: parsed.dati_chiave || "",
+        azioni: parsed.azioni_richieste || "",
+      } : i));
+    } catch (e) {
+      setItems(prev => prev.map(i => i.id === item.id ? { ...i, status:"error", errore: e.message } : i));
+    }
+  };
+
+  const selected = items.find(i => i.id === selectedId);
+  const fmtSize = (bytes) => bytes > 1024*1024 ? (bytes/1024/1024).toFixed(1)+" MB" : (bytes/1024).toFixed(0)+" KB";
+
+  return (
+    <div>
+      {/* API key */}
+      <div style={{ background:"#1e293b", border:"1px solid #334155", borderRadius:12, padding:16, marginBottom:20 }}>
+        <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.82rem", marginBottom:8 }}>🔑 GEMINI API KEY</div>
+        <div style={{ display:"flex", gap:8 }}>
+          <input
+            type={apiKeySaved ? "password" : "text"}
+            value={apiKey}
+            onChange={e => { setApiKey(e.target.value); setApiKeySaved(false); }}
+            placeholder="Incolla qui la tua API Key (AIza...)"
+            style={{ ...inpStyle, flex:1 }}
+          />
+          <button onClick={() => setApiKeySaved(true)}
+            style={{ background: apiKeySaved?"#14532d":"#1d4ed8", color: apiKeySaved?"#86efac":"#fff", border:"none", borderRadius:8, padding:"8px 16px", cursor:"pointer", fontWeight:700, fontSize:"0.82rem", whiteSpace:"nowrap" }}>
+            {apiKeySaved ? "✓ Salvata" : "Salva"}
+          </button>
+        </div>
+        {!apiKeySaved && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:6 }}>Ottieni la chiave gratuita su aistudio.google.com → Get API Key</div>}
+      </div>
+
+      {/* upload */}
+      <label style={{ display:"block", background:"#0f172a", border:"2px dashed #334155", borderRadius:12, padding:"28px 16px", textAlign:"center", cursor:"pointer", marginBottom:20 }}>
+        <input type="file" multiple accept="image/*,.pdf" onChange={handleFiles} style={{ display:"none" }} />
+        <div style={{ fontSize:"2rem", marginBottom:8 }}>📂</div>
+        <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.95rem", marginBottom:4 }}>Carica documenti per l'archivio</div>
+        <div style={{ color:"#64748b", fontSize:"0.8rem" }}>L'AI apre ogni file, lo capisce e suggerisce la cartella giusta — fino a 10 file insieme</div>
+      </label>
+
+      <div style={{ display:"grid", gridTemplateColumns: selected ? "1fr 1.1fr" : "1fr", gap:20 }}>
+        {/* lista documenti */}
+        <div>
+          {items.length === 0 && (
+            <div style={{ color:"#475569", fontSize:"0.85rem", textAlign:"center", padding:30 }}>Nessun documento caricato ancora</div>
+          )}
+          {items.map(item => {
+            const st = ARCHIVIO_STATUS_STYLE[item.status];
+            return (
+              <div key={item.id} onClick={() => setSelectedId(item.id)}
+                style={{ background: selectedId===item.id?"#1e3a5f":"#1e293b", border:`1px solid ${selectedId===item.id?"#3b82f6":"#334155"}`, borderRadius:10, padding:"12px 14px", marginBottom:6, cursor:"pointer" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10 }}>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ color:"#e2e8f0", fontWeight:600, fontSize:"0.88rem", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                      {item.file.type?.startsWith("image")?"🖼":"📄"} {item.file.name}
+                    </div>
+                    <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:2 }}>{fmtSize(item.file.size)}</div>
+                  </div>
+                  <span style={{ background:st.bg, color:st.color, fontSize:"0.68rem", fontWeight:700, padding:"3px 9px", borderRadius:99, whiteSpace:"nowrap" }}>
+                    {st.label}
+                  </span>
+                </div>
+                {item.status === "done" && (
+                  <div style={{ marginTop:8, background:"#0f172a", borderRadius:7, padding:"6px 10px" }}>
+                    <div style={{ color:"#7dd3fc", fontSize:"0.78rem", fontWeight:700 }}>📁 {item.cartella}</div>
+                  </div>
+                )}
+                {item.status === "error" && (
+                  <div style={{ marginTop:8, color:"#fca5a5", fontSize:"0.75rem" }}>{item.errore}</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* dettaglio */}
+        {selected && selected.status === "done" && (
+          <div style={{ background:"#1e293b", border:"1px solid #1e3a5f", borderRadius:12, padding:18, maxHeight:560, overflowY:"auto" }}>
+            <div style={{ color:"#475569", fontSize:"0.75rem", marginBottom:4 }}>{selected.file.name}</div>
+            <div style={{ background:"#0c3547", border:"1px solid #1e3a5f", borderRadius:8, padding:"10px 14px", marginBottom:14 }}>
+              <div style={{ color:"#64748b", fontSize:"0.72rem", marginBottom:2 }}>CARTELLA DI DESTINAZIONE</div>
+              <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.92rem" }}>📁 {selected.cartella}</div>
+            </div>
+
+            <div style={{ marginBottom:14 }}>
+              <div style={{ color:"#94a3b8", fontSize:"0.75rem", fontWeight:700, marginBottom:4 }}>PERCHÉ QUESTA CARTELLA</div>
+              <div style={{ color:"#cbd5e1", fontSize:"0.85rem", lineHeight:1.6 }}>{selected.motivazione}</div>
+            </div>
+            <div style={{ marginBottom:14 }}>
+              <div style={{ color:"#94a3b8", fontSize:"0.75rem", fontWeight:700, marginBottom:4 }}>RIASSUNTO CONTENUTO</div>
+              <div style={{ color:"#cbd5e1", fontSize:"0.85rem", lineHeight:1.6 }}>{selected.riassunto}</div>
+            </div>
+            <div style={{ marginBottom:14 }}>
+              <div style={{ color:"#94a3b8", fontSize:"0.75rem", fontWeight:700, marginBottom:4 }}>DATI CHIAVE</div>
+              <div style={{ color:"#cbd5e1", fontSize:"0.85rem", lineHeight:1.6 }}>{selected.datiChiave}</div>
+            </div>
+            <div style={{ marginBottom:4 }}>
+              <div style={{ color:"#94a3b8", fontSize:"0.75rem", fontWeight:700, marginBottom:4 }}>AZIONI RICHIESTE</div>
+              <div style={{ color:"#fbbf24", fontSize:"0.85rem", lineHeight:1.6 }}>{selected.azioni}</div>
+            </div>
+
+            <div style={{ background:"#450a0a22", border:"1px solid #ef444433", borderRadius:8, padding:"8px 12px", marginTop:14, color:"#fca5a5", fontSize:"0.72rem" }}>
+              ⚠ Il salvataggio automatico su Google Drive non è ancora collegato — per ora questa è solo l'anteprima della classificazione.
+            </div>
+          </div>
+        )}
+      </div>
+
+      <p style={{ color:"#475569", fontSize:"0.75rem", marginTop:16 }}>
+        💡 L'AI legge il contenuto reale del documento (non solo il nome del file) per decidere la cartella più adatta tra le {STRUTTURA_ARCHIVIO.length} disponibili in archivio.
+      </p>
+    </div>
+  );
+}
+
 const TABS = [
   { id:"scheda",   label:"📋 Scheda Negozio" },
   { id:"workflow", label:"✅ Workflow" },
@@ -1048,6 +1281,7 @@ const TABS = [
   { id:"budget",   label:"💶 Budget HP INV" },
   { id:"ai",       label:"🤖 Analisi AI" },
   { id:"pdf",      label:"📝 Editor PDF" },
+  { id:"documenti",label:"📁 Documenti" },
 ];
 
 export default function App() {
@@ -1119,6 +1353,7 @@ export default function App() {
         {tab==="budget"   && <TabBudget />}
         {tab==="ai"       && <TabAnalisiAI />}
         {tab==="pdf"      && <TabEditorPDF />}
+        {tab==="documenti"&& <TabDocumenti />}
       </div>
     </div>
   );
