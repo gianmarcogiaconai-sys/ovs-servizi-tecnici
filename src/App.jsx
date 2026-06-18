@@ -429,40 +429,14 @@ function PrioritaBadge({ p }) {
 
 // ── TABS ──────────────────────────────────────────────────────────────────────
 
-function TabWorkflow({ commessaIdGlobale, onCambiaCommessa }) {
+function TabWorkflow({ commessaIdGlobale, commesse, commessaSelezionata }) {
   const [faseFiltro, setFaseFiltro] = useState("TUTTE");
   const [searchQ, setSearchQ] = useState("");
-  const [commesse, setCommesse] = useState([]);
-  const [commessaId, setCommessaId] = useState(commessaIdGlobale || "");
-  const [caricamentoCommesse, setCaricamentoCommesse] = useState(true);
-  const [filtroBrand, setFiltroBrand] = useState("TUTTI");
+  const commessaId = commessaIdGlobale || "";
   const [completati, setCompletati] = useState(new Set()); // Set di workflow_id completati per la commessa selezionata
   const [caricamentoStati, setCaricamentoStati] = useState(false);
   const [erroreStati, setErroreStati] = useState("");
   const [aggiornamentoInCorso, setAggiornamentoInCorso] = useState(null); // workflow_id in fase di toggle, per disabilitare il click doppio
-
-  const commesseFiltrate = filtroBrand === "TUTTI" ? commesse : commesse.filter(c => c.brand === filtroBrand);
-
-  // Carica l'elenco commesse una sola volta
-  useEffect(() => {
-    (async () => {
-      const { data, error } = await supabase.from("commesse").select("*").order("created_at", { ascending:false });
-      if (!error && data) setCommesse(data);
-      setCaricamentoCommesse(false);
-    })();
-  }, []);
-
-  // Sincronizza con la selezione globale (es. se cambiata da un altro tab)
-  useEffect(() => {
-    if (commessaIdGlobale !== undefined && commessaIdGlobale !== commessaId) {
-      setCommessaId(commessaIdGlobale || "");
-    }
-  }, [commessaIdGlobale]);
-
-  const selezionaCommessaLocale = (id) => {
-    setCommessaId(id);
-    onCambiaCommessa?.(id || null);
-  };
 
   // Ogni volta che cambia la commessa, carica da Supabase quali attività
   // sono già state completate per quella commessa.
@@ -523,29 +497,12 @@ function TabWorkflow({ commessaIdGlobale, onCambiaCommessa }) {
 
   return (
     <div>
-      {/* selettore brand + commessa */}
+      {/* indicazione commessa attiva (selezionata dall'header) */}
       <div style={{ marginBottom:20 }}>
-        <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Brand</label>
-        <select
-          value={filtroBrand}
-          onChange={e => setFiltroBrand(e.target.value)}
-          style={{ background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.9rem", cursor:"pointer", marginBottom:10 }}
-        >
-          <option value="TUTTI">Tutti i brand</option>
-          {BRAND_LIST.map(b => <option key={b} value={b}>{b}</option>)}
-        </select>
-        <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Commessa</label>
-        <select
-          value={commessaId}
-          onChange={e => selezionaCommessaLocale(e.target.value)}
-          style={{ background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.9rem", cursor:"pointer" }}
-        >
-          <option value="">Seleziona una commessa…</option>
-          {commesseFiltrate.map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}
-        </select>
-        {caricamentoCommesse && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Caricamento elenco commesse…</div>}
-        {!caricamentoCommesse && commesseFiltrate.length === 0 && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Nessuna commessa trovata per questo brand.</div>}
-        {!commessaId && !caricamentoCommesse && <div style={{ color:"#64748b", fontSize:"0.78rem", marginTop:6 }}>Seleziona una commessa per vedere e aggiornare l'avanzamento del workflow.</div>}
+        {!commessaId && <div style={{ color:"#64748b", fontSize:"0.82rem", background:"#1e293b", border:"1px solid #334155", borderRadius:8, padding:"10px 14px" }}>Seleziona una commessa dal menu in alto per vedere e aggiornare l'avanzamento del workflow.</div>}
+        {commessaId && commessaSelezionata && (
+          <div style={{ color:"#7dd3fc", fontSize:"0.82rem", background:"#0c3547", border:"1px solid #1e3a5f", borderRadius:8, padding:"10px 14px" }}>📁 Commessa attiva: <strong>{commessaSelezionata.nome}</strong></div>
+        )}
         {caricamentoStati && <div style={{ color:"#7dd3fc", fontSize:"0.78rem", marginTop:6 }}>⏳ Caricamento avanzamento…</div>}
         {erroreStati && <div style={{ color:"#fca5a5", fontSize:"0.78rem", marginTop:6 }}>{erroreStati}</div>}
       </div>
@@ -623,13 +580,10 @@ function TabWorkflow({ commessaIdGlobale, onCambiaCommessa }) {
   );
 }
 
-function TabPratiche({ commessaIdGlobale, onCambiaCommessa }) {
+function TabPratiche({ commessaIdGlobale, commesse, commessaSelezionata }) {
   const [stati, setStati] = useState(() => Object.fromEntries(PRATICHE.map((p,i) => [i, "—"])));
   const [filtroP, setFiltroP] = useState("TUTTE");
-  const [commesse, setCommesse] = useState([]);
-  const [commessaId, setCommessaId] = useState(commessaIdGlobale || "");
-  const [caricamentoCommesse, setCaricamentoCommesse] = useState(true);
-  const [filtroBrand, setFiltroBrand] = useState("TUTTI");
+  const commessaId = commessaIdGlobale || "";
   const [documentiPerVoce, setDocumentiPerVoce] = useState({}); // voce -> [ {nome_file, riassunto, dati_chiave, data_caricamento}, ... ]
   const [caricamentoDocumenti, setCaricamentoDocumenti] = useState(false);
   const [erroreDocumenti, setErroreDocumenti] = useState("");
@@ -638,28 +592,6 @@ function TabPratiche({ commessaIdGlobale, onCambiaCommessa }) {
   const [erroreRimozione, setErroreRimozione] = useState("");
 
   const cats = [...new Set(PRATICHE.map(p=>p.categoria))];
-  const commesseFiltrate = filtroBrand === "TUTTI" ? commesse : commesse.filter(c => c.brand === filtroBrand);
-
-  // Carica l'elenco commesse una sola volta
-  useEffect(() => {
-    (async () => {
-      const { data, error } = await supabase.from("commesse").select("*").order("created_at", { ascending:false });
-      if (!error && data) setCommesse(data);
-      setCaricamentoCommesse(false);
-    })();
-  }, []);
-
-  // Sincronizza con la selezione globale (es. se cambiata da un altro tab)
-  useEffect(() => {
-    if (commessaIdGlobale !== undefined && commessaIdGlobale !== commessaId) {
-      setCommessaId(commessaIdGlobale || "");
-    }
-  }, [commessaIdGlobale]);
-
-  const selezionaCommessaLocale = (id) => {
-    setCommessaId(id);
-    onCambiaCommessa?.(id || null);
-  };
 
   // Ogni volta che cambia la commessa, carica da Supabase tutti i documenti
   // collegati a voci della checklist per quella commessa, raggruppati per voce.
@@ -740,29 +672,12 @@ function TabPratiche({ commessaIdGlobale, onCambiaCommessa }) {
   return (
     <div style={{ display:"grid", gridTemplateColumns: docVoceSelezionata ? "1fr 1.1fr" : "1fr", gap:20 }}>
       <div>
-        {/* selettore commessa */}
+        {/* indicazione commessa attiva (selezionata dall'header) */}
         <div style={{ marginBottom:16 }}>
-          <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Brand</label>
-          <select
-            value={filtroBrand}
-            onChange={e => setFiltroBrand(e.target.value)}
-            style={{ background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.9rem", cursor:"pointer", marginBottom:10 }}
-          >
-            <option value="TUTTI">Tutti i brand</option>
-            {BRAND_LIST.map(b => <option key={b} value={b}>{b}</option>)}
-          </select>
-          <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Commessa</label>
-          <select
-            value={commessaId}
-            onChange={e => selezionaCommessaLocale(e.target.value)}
-            style={{ background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.9rem", cursor:"pointer" }}
-          >
-            <option value="">Seleziona una commessa…</option>
-            {commesseFiltrate.map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}
-          </select>
-          {caricamentoCommesse && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Caricamento elenco commesse…</div>}
-          {!caricamentoCommesse && commesseFiltrate.length === 0 && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Nessuna commessa trovata per questo brand.</div>}
-          {!commessaId && !caricamentoCommesse && <div style={{ color:"#64748b", fontSize:"0.78rem", marginTop:6 }}>Seleziona una commessa per vedere quali documenti sono già stati collegati automaticamente dal tab Documenti.</div>}
+          {!commessaId && <div style={{ color:"#64748b", fontSize:"0.82rem", background:"#1e293b", border:"1px solid #334155", borderRadius:8, padding:"10px 14px" }}>Seleziona una commessa dal menu in alto per vedere quali documenti sono già stati collegati automaticamente dal tab Documenti.</div>}
+          {commessaId && commessaSelezionata && (
+            <div style={{ color:"#7dd3fc", fontSize:"0.82rem", background:"#0c3547", border:"1px solid #1e3a5f", borderRadius:8, padding:"10px 14px" }}>📁 Commessa attiva: <strong>{commessaSelezionata.nome}</strong></div>
+          )}
           {caricamentoDocumenti && <div style={{ color:"#7dd3fc", fontSize:"0.78rem", marginTop:6 }}>⏳ Caricamento documenti collegati…</div>}
           {erroreDocumenti && <div style={{ color:"#fca5a5", fontSize:"0.78rem", marginTop:6 }}>{erroreDocumenti}</div>}
         </div>
@@ -915,11 +830,8 @@ const estraiValoriBudgetDaFile = async (file) => {
 
 const valoriVuoti = () => Object.fromEntries(BUDGET_VOCI.map(v=>v.n).map(n=>[n, { std:0, extra:0 }]));
 
-function TabBudget({ commessaIdGlobale, onCambiaCommessa }) {
-  const [commesse, setCommesse] = useState([]);
-  const [commessaId, setCommessaId] = useState(commessaIdGlobale || "");
-  const [caricamentoCommesse, setCaricamentoCommesse] = useState(true);
-  const [filtroBrand, setFiltroBrand] = useState("TUTTI");
+function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
+  const commessaId = commessaIdGlobale || "";
   const [caricamentoBudget, setCaricamentoBudget] = useState(false);
   const [erroreCaricamento, setErroreCaricamento] = useState("");
   const [ultimoAggiornamento, setUltimoAggiornamento] = useState(null); // { updated_at, nome_file_origine } | null
@@ -935,8 +847,6 @@ function TabBudget({ commessaIdGlobale, onCambiaCommessa }) {
   const [importRiepilogo, setImportRiepilogo] = useState(null); // { trovate, nonTrovate }
 
   const setVal = (n, campo, v) => setValori(prev=>({ ...prev, [n]:{ ...prev[n], [campo]: Number(v)||0 } }));
-  const commessaSelezionata = commesse.find(c => c.id === commessaId);
-  const commesseFiltrate = filtroBrand === "TUTTI" ? commesse : commesse.filter(c => c.brand === filtroBrand);
 
   const cats = [...new Set(BUDGET_VOCI.map(v=>v.categoria))];
 
@@ -945,28 +855,6 @@ function TabBudget({ commessaIdGlobale, onCambiaCommessa }) {
   const totaleExtra = BUDGET_VOCI.reduce((acc,v)=>acc + (valori[v.n]?.extra||0), 0);
 
   const inputStyle = { background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:6, padding:"5px 8px", width:110, textAlign:"right", fontSize:"0.82rem", outline:"none" };
-
-  // Carica l'elenco commesse, una sola volta
-  useEffect(() => {
-    (async () => {
-      const { data, error } = await supabase.from("commesse").select("*").order("created_at", { ascending:false });
-      if (!error && data) setCommesse(data);
-      setCaricamentoCommesse(false);
-    })();
-  }, []);
-
-  // Tiene sincronizzata la selezione con lo stato globale (es. se l'utente
-  // seleziona la commessa dal tab Documenti o dalla Scheda Negozio).
-  useEffect(() => {
-    if (commessaIdGlobale !== undefined && commessaIdGlobale !== commessaId) {
-      setCommessaId(commessaIdGlobale || "");
-    }
-  }, [commessaIdGlobale]);
-
-  const selezionaCommessaLocale = (id) => {
-    setCommessaId(id);
-    onCambiaCommessa?.(id || null);
-  };
 
   // Ogni volta che cambia la commessa selezionata, carica da Supabase
   // l'ultima versione salvata del budget (sovrascrive sempre lo stato locale,
@@ -1088,29 +976,12 @@ function TabBudget({ commessaIdGlobale, onCambiaCommessa }) {
 
   return (
     <div>
-      {/* selettore commessa */}
+      {/* indicazione commessa attiva (selezionata dall'header) */}
       <div style={{ marginBottom:20 }}>
-        <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Brand</label>
-        <select
-          value={filtroBrand}
-          onChange={e => setFiltroBrand(e.target.value)}
-          style={{ background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.9rem", cursor:"pointer", marginBottom:10 }}
-        >
-          <option value="TUTTI">Tutti i brand</option>
-          {BRAND_LIST.map(b => <option key={b} value={b}>{b}</option>)}
-        </select>
-        <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Commessa</label>
-        <select
-          value={commessaId}
-          onChange={e => selezionaCommessaLocale(e.target.value)}
-          style={{ background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.9rem", cursor:"pointer" }}
-        >
-          <option value="">Seleziona una commessa…</option>
-          {commesseFiltrate.map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}
-        </select>
-        {caricamentoCommesse && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Caricamento elenco commesse…</div>}
-        {!caricamentoCommesse && commesseFiltrate.length === 0 && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Nessuna commessa trovata per questo brand.</div>}
-        {!commessaId && !caricamentoCommesse && <div style={{ color:"#64748b", fontSize:"0.78rem", marginTop:6 }}>Seleziona una commessa per vedere o modificare il suo Budget HP INV.</div>}
+        {!commessaId && <div style={{ color:"#64748b", fontSize:"0.82rem", background:"#1e293b", border:"1px solid #334155", borderRadius:8, padding:"10px 14px" }}>Seleziona una commessa dal menu in alto per vedere o modificare il suo Budget HP INV.</div>}
+        {commessaId && commessaSelezionata && (
+          <div style={{ color:"#7dd3fc", fontSize:"0.82rem", background:"#0c3547", border:"1px solid #1e3a5f", borderRadius:8, padding:"10px 14px" }}>📁 Commessa attiva: <strong>{commessaSelezionata.nome}</strong></div>
+        )}
         {caricamentoBudget && <div style={{ color:"#7dd3fc", fontSize:"0.78rem", marginTop:6 }}>⏳ Caricamento ultima versione del budget…</div>}
         {erroreCaricamento && <div style={{ color:"#fca5a5", fontSize:"0.78rem", marginTop:6 }}>{erroreCaricamento}</div>}
         {commessaId && !caricamentoBudget && ultimoAggiornamento && (
@@ -1266,11 +1137,9 @@ function TabBudget({ commessaIdGlobale, onCambiaCommessa }) {
   );
 }
 
-const FORM_VUOTO = { id:null, nome:"", brand:"OVS", responsabile:"", tecnico:"", periodo:"", indirizzo:"", citta:"", mq:0, note:"", drive_folder_id:null };
+const FORM_VUOTO = { id:null, nome:"", brand:"OVS", responsabile:"", tecnico:"", periodo:"", indirizzo:"", citta:"", mq_vendita:0, mq_riserva:0, mq_totali:0, note:"", drive_folder_id:null };
 
-function TabScheda({ commessaIdGlobale, onCambiaCommessa }) {
-  const [commesse, setCommesse] = useState([]);
-  const [caricamentoLista, setCaricamentoLista] = useState(true);
+function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSalvata }) {
   const [form, setForm] = useState(FORM_VUOTO);
   const [salvataggio, setSalvataggio] = useState("idle"); // idle | saving | saved | error
   const [erroreSalvataggio, setErroreSalvataggio] = useState("");
@@ -1280,15 +1149,6 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa }) {
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
   const inpStyle = { background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.9rem" };
 
-  const caricaCommesse = async () => {
-    setCaricamentoLista(true);
-    const { data, error } = await supabase.from("commesse").select("*").order("created_at", { ascending:false });
-    if (!error && data) setCommesse(data);
-    setCaricamentoLista(false);
-  };
-
-  useEffect(() => { caricaCommesse(); }, []);
-
   const selezionaCommessa = (id) => {
     if (!id) { setForm(FORM_VUOTO); onCambiaCommessa?.(null); return; }
     const c = commesse.find(x => x.id === id);
@@ -1296,8 +1156,8 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa }) {
     onCambiaCommessa?.(id || null);
   };
 
-  // Se la commessa selezionata globalmente cambia da un altro tab (es. da
-  // Documenti), aggiorna anche il form della Scheda Negozio di conseguenza.
+  // Se la commessa selezionata globalmente cambia da un altro tab o dal
+  // menu nell'header, aggiorna anche il form della Scheda Negozio di conseguenza.
   useEffect(() => {
     if (commessaIdGlobale && commessaIdGlobale !== form.id && commesse.length > 0) {
       const c = commesse.find(x => x.id === commessaIdGlobale);
@@ -1315,7 +1175,9 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa }) {
 
     const payload = {
       nome: form.nome, brand: form.brand, responsabile: form.responsabile, tecnico: form.tecnico,
-      periodo: form.periodo, indirizzo: form.indirizzo, citta: form.citta, mq: form.mq || null, note: form.note,
+      periodo: form.periodo, indirizzo: form.indirizzo, citta: form.citta,
+      mq_vendita: form.mq_vendita || null, mq_riserva: form.mq_riserva || null, mq_totali: form.mq_totali || null,
+      note: form.note,
       updated_at: new Date().toISOString(),
     };
 
@@ -1330,7 +1192,7 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa }) {
         onCambiaCommessa?.(data.id);
       }
       setSalvataggio("saved");
-      await caricaCommesse();
+      await onCommessaSalvata?.();
       setTimeout(() => setSalvataggio("idle"), 2500);
     } catch (e) {
       setErroreSalvataggio(e.message || "Errore durante il salvataggio.");
@@ -1348,7 +1210,7 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa }) {
       if (error) throw error;
       setForm(f => ({ ...f, drive_folder_id: rootId }));
       setDriveStato("done");
-      await caricaCommesse();
+      await onCommessaSalvata?.();
     } catch (e) {
       setErroreDrive(e.message || "Errore durante la creazione su Drive.");
       setDriveStato("error");
@@ -1370,7 +1232,6 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa }) {
             {commesse.map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}
           </select>
         </div>
-        {caricamentoLista && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Caricamento elenco commesse…</div>}
       </div>
 
       <div style={{ color:"#64748b", fontSize:"0.82rem", marginBottom:18 }}>Compila la scheda del negozio. Salvando, la commessa resta disponibile anche negli altri tab e dopo aver chiuso l'app.</div>
@@ -1427,7 +1288,6 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa }) {
       {[
         { label:"Indirizzo", key:"indirizzo" },
         { label:"Città", key:"citta" },
-        { label:"MQ vendita lordi", key:"mq", type:"number" },
       ].map(f=>(
         <div key={f.key} style={{ marginBottom:14 }}>
           <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>{f.label}</label>
@@ -1439,6 +1299,20 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa }) {
           }
         </div>
       ))}
+
+      {/* MQ: vendita, riserva e totali come campi indipendenti */}
+      <div style={{ display:"flex", gap:10, marginBottom:14, flexWrap:"wrap" }}>
+        {[
+          { label:"MQ area vendita", key:"mq_vendita" },
+          { label:"MQ riserva", key:"mq_riserva" },
+          { label:"MQ totali", key:"mq_totali" },
+        ].map(f=>(
+          <div key={f.key} style={{ flex:1, minWidth:120 }}>
+            <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>{f.label}</label>
+            <input type="number" value={form[f.key]} onChange={e=>set(f.key,e.target.value)} style={inpStyle} />
+          </div>
+        ))}
+      </div>
       <div style={{ marginBottom:18 }}>
         <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Note / Peculiarità</label>
         <textarea value={form.note} onChange={e=>set("note",e.target.value)} rows={3} style={{ ...inpStyle, resize:"vertical" }} />
@@ -1479,7 +1353,7 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa }) {
       {form.nome && (
         <div style={{ background:"#0f172a", border:"1px solid #1e3a5f", borderRadius:12, padding:18, marginTop:8 }}>
           <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"1rem", marginBottom:10 }}>📋 Scheda negozio</div>
-          {[["Brand", form.brand],["Commessa",form.nome],["Responsabile",form.responsabile],["Tecnico",form.tecnico],["Periodo",formattaPeriodo(form.periodo)],["Indirizzo",`${form.indirizzo}${form.citta?" – "+form.citta:""}`],["MQ vendita",form.mq?form.mq+" mq":""]].filter(([,v])=>v).map(([k,v])=>(
+          {[["Brand", form.brand],["Commessa",form.nome],["Responsabile",form.responsabile],["Tecnico",form.tecnico],["Periodo",formattaPeriodo(form.periodo)],["Indirizzo",`${form.indirizzo}${form.citta?" – "+form.citta:""}`],["MQ vendita",form.mq_vendita?form.mq_vendita+" mq":""],["MQ riserva",form.mq_riserva?form.mq_riserva+" mq":""],["MQ totali",form.mq_totali?form.mq_totali+" mq":""]].filter(([,v])=>v).map(([k,v])=>(
             <div key={k} style={{ display:"flex", gap:8, marginBottom:5 }}>
               <span style={{ color:"#475569", width:120, fontSize:"0.82rem", flexShrink:0 }}>{k}</span>
               <span style={{ color:"#e2e8f0", fontSize:"0.82rem" }}>{v}</span>
@@ -2122,42 +1996,13 @@ const ARCHIVIO_STATUS_STYLE = {
   error:     { bg:"#450a0a", color:"#fca5a5", label:"Errore" },
 };
 
-function TabDocumenti({ commessaIdGlobale, onCambiaCommessa }) {
+function TabDocumenti({ commessaIdGlobale, commesse, commessaSelezionata }) {
   const [apiKey, setApiKey] = useState(() => getStoredApiKey());
   const [apiKeySaved, setApiKeySaved] = useState(() => !!getStoredApiKey());
   const [items, setItems] = useState([]); // { id, file, status, cartella, motivazione, riassunto, datiChiave, azioni, errore, driveStato, mappaCartelle }
   const [selectedId, setSelectedId] = useState(null);
-  const [commesse, setCommesse] = useState([]);
-  const [commessaId, setCommessaId] = useState(commessaIdGlobale || "");
-  const [caricamentoCommesse, setCaricamentoCommesse] = useState(true);
-  const [filtroBrand, setFiltroBrand] = useState("TUTTI");
 
   const inpStyle = { background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.88rem" };
-
-  useEffect(() => {
-    (async () => {
-      const { data, error } = await supabase.from("commesse").select("*").order("created_at", { ascending:false });
-      if (!error && data) setCommesse(data);
-      setCaricamentoCommesse(false);
-    })();
-  }, []);
-
-  // Mantiene sincronizzata la selezione con lo stato globale, in entrambe le
-  // direzioni: se l'utente cambia commessa qui, lo segnala in alto; se la
-  // commessa globale cambia da un altro tab, si aggiorna anche qui.
-  useEffect(() => {
-    if (commessaIdGlobale !== undefined && commessaIdGlobale !== commessaId) {
-      setCommessaId(commessaIdGlobale || "");
-    }
-  }, [commessaIdGlobale]);
-
-  const selezionaCommessaLocale = (id) => {
-    setCommessaId(id);
-    onCambiaCommessa?.(id || null);
-  };
-
-  const commessaSelezionata = commesse.find(c => c.id === commessaId);
-  const commesseFiltrate = filtroBrand === "TUTTI" ? commesse : commesse.filter(c => c.brand === filtroBrand);
 
   const toBase64 = (file) => new Promise((res, rej) => {
     const r = new FileReader();
@@ -2375,22 +2220,16 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
         {!apiKeySaved && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:6 }}>Ottieni la chiave gratuita su aistudio.google.com → Get API Key. Verrà salvata in questo browser e usata automaticamente in tutti i tab.</div>}
       </div>
 
-      {/* selettore commessa */}
+      {/* indicazione commessa attiva (selezionata dall'header) */}
       <div style={{ marginBottom:20 }}>
-        <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Brand</label>
-        <select value={filtroBrand} onChange={e => setFiltroBrand(e.target.value)} style={{ ...inpStyle, cursor:"pointer", marginBottom:10 }}>
-          <option value="TUTTI">Tutti i brand</option>
-          {BRAND_LIST.map(b => <option key={b} value={b}>{b}</option>)}
-        </select>
-        <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Commessa di destinazione</label>
-        <select value={commessaId} onChange={e => selezionaCommessaLocale(e.target.value)} style={{ ...inpStyle, cursor:"pointer" }}>
-          <option value="">Seleziona una commessa…</option>
-          {commesseFiltrate.map(c => <option key={c.id} value={c.id}>{c.nome}{!c.drive_folder_id ? " (cartella Drive non creata)" : ""}</option>)}
-        </select>
-        {caricamentoCommesse && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Caricamento elenco commesse…</div>}
-        {!caricamentoCommesse && commesseFiltrate.length === 0 && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Nessuna commessa trovata per questo brand.</div>}
+        {!commessaSelezionata && (
+          <div style={{ color:"#64748b", fontSize:"0.82rem", background:"#1e293b", border:"1px solid #334155", borderRadius:8, padding:"10px 14px" }}>Seleziona una commessa dal menu in alto per caricare e classificare documenti.</div>
+        )}
+        {commessaSelezionata && (
+          <div style={{ color:"#7dd3fc", fontSize:"0.82rem", background:"#0c3547", border:"1px solid #1e3a5f", borderRadius:8, padding:"10px 14px" }}>📁 Commessa attiva: <strong>{commessaSelezionata.nome}</strong></div>
+        )}
         {commessaSelezionata && !commessaSelezionata.drive_folder_id && (
-          <div style={{ color:"#fbbf24", fontSize:"0.75rem", marginTop:4 }}>⚠ Questa commessa non ha ancora una cartella Drive. Crea la struttura dalla Scheda Negozio prima di caricare i documenti.</div>
+          <div style={{ color:"#fbbf24", fontSize:"0.75rem", marginTop:6 }}>⚠ Questa commessa non ha ancora una cartella Drive. Crea la struttura dalla Scheda Negozio prima di caricare i documenti.</div>
         )}
       </div>
 
@@ -2549,9 +2388,31 @@ export default function App() {
   const [tab, setTab] = useState("workflow");
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
-  // Commessa selezionata, condivisa tra Scheda Negozio, Documenti e Budget HP INV,
-  // così cambiando tab non si perde la selezione e i dati restano coerenti.
+  // Commessa selezionata, condivisa da tutti i tab tramite il selettore unico
+  // nell'header: cambiando tab la selezione resta la stessa.
   const [commessaIdGlobale, setCommessaIdGlobale] = useState(null);
+  const [commesseGlobali, setCommesseGlobali] = useState([]);
+  const [caricamentoCommesseGlobali, setCaricamentoCommesseGlobali] = useState(true);
+  const [filtroBrandGlobale, setFiltroBrandGlobale] = useState("TUTTI");
+
+  const caricaCommesseGlobali = async () => {
+    setCaricamentoCommesseGlobali(true);
+    const { data, error } = await supabase.from("commesse").select("*").order("created_at", { ascending:false });
+    if (!error && data) setCommesseGlobali(data);
+    setCaricamentoCommesseGlobali(false);
+  };
+
+  useEffect(() => { caricaCommesseGlobali(); }, []);
+
+  const commesseFiltrateGlobali = filtroBrandGlobale === "TUTTI" ? commesseGlobali : commesseGlobali.filter(c => c.brand === filtroBrandGlobale);
+  const commessaSelezionataGlobale = commesseGlobali.find(c => c.id === commessaIdGlobale);
+
+  // Selezionare "+ Nuova commessa" dal menu in alto azzera la selezione e
+  // porta dritti alla Scheda Negozio, pronta per compilare una commessa nuova.
+  const selezionaNuovaCommessa = () => {
+    setCommessaIdGlobale(null);
+    setTab("scheda");
+  };
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -2598,6 +2459,29 @@ export default function App() {
               🚪 Esci
             </button>
           </div>
+
+          {/* selettore globale brand + commessa: vale per tutti i tab */}
+          <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap" }}>
+            <select
+              value={filtroBrandGlobale}
+              onChange={e => setFiltroBrandGlobale(e.target.value)}
+              style={{ background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"7px 12px", outline:"none", fontSize:"0.85rem", cursor:"pointer" }}
+            >
+              <option value="TUTTI">Tutti i brand</option>
+              {BRAND_LIST.map(b => <option key={b} value={b}>{b}</option>)}
+            </select>
+            <select
+              value={commessaIdGlobale || ""}
+              onChange={e => { if (e.target.value === "__nuova__") selezionaNuovaCommessa(); else setCommessaIdGlobale(e.target.value || null); }}
+              style={{ background:"#0f172a", color:"#e2e8f0", border:"1px solid #3b82f6", borderRadius:8, padding:"7px 12px", outline:"none", fontSize:"0.85rem", cursor:"pointer", flex:1, minWidth:200, fontWeight:600 }}
+            >
+              <option value="">Seleziona commessa…</option>
+              <option value="__nuova__">➕ Nuova commessa</option>
+              {commesseFiltrateGlobali.map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}
+            </select>
+          </div>
+          {caricamentoCommesseGlobali && <div style={{ color:"#475569", fontSize:"0.72rem", marginTop:-10, marginBottom:10 }}>Caricamento commesse…</div>}
+
           <div style={{ display:"flex", gap:2, overflowX:"auto" }}>
             {TABS.map(t=>(
               <button key={t.id} onClick={()=>setTab(t.id)}
@@ -2611,13 +2495,13 @@ export default function App() {
 
       {/* content */}
       <div style={{ maxWidth:1100, margin:"0 auto", padding:"28px 24px" }}>
-        {tab==="scheda"   && <TabScheda commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} />}
-        {tab==="workflow" && <TabWorkflow commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} />}
-        {tab==="pratiche" && <TabPratiche commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} />}
-        {tab==="budget"   && <TabBudget commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} />}
+        {tab==="scheda"   && <TabScheda commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} commesse={commesseGlobali} onCommessaSalvata={caricaCommesseGlobali} />}
+        {tab==="workflow" && <TabWorkflow commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
+        {tab==="pratiche" && <TabPratiche commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
+        {tab==="budget"   && <TabBudget commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="ai"       && <TabAnalisiAI />}
         {tab==="pdf"      && <TabEditorPDF />}
-        {tab==="documenti"&& <TabDocumenti commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} />}
+        {tab==="documenti"&& <TabDocumenti commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
       </div>
     </div>
   );
