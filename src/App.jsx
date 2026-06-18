@@ -1194,7 +1194,7 @@ function TabAnalisiAI() {
       }
 
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${apiKey}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1900,7 +1900,7 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
       }
 
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${apiKey}`,
         { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ parts }] }) }
       );
 
@@ -2028,7 +2028,15 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
                   </div>
                 )}
                 {item.status === "error" && (
-                  <div style={{ marginTop:8, color:"#fca5a5", fontSize:"0.75rem" }}>{item.errore}</div>
+                  <div style={{ marginTop:8 }}>
+                    <div style={{ color:"#fca5a5", fontSize:"0.75rem", marginBottom:6 }}>{item.errore}</div>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); classifica(item); }}
+                      style={{ background:"#1e293b", color:"#7dd3fc", border:"1px solid #334155", borderRadius:6, padding:"5px 12px", cursor:"pointer", fontSize:"0.75rem", fontWeight:700 }}
+                    >
+                      🔄 Riprova
+                    </button>
+                  </div>
                 )}
               </div>
             );
