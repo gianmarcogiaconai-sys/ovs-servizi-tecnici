@@ -508,55 +508,229 @@ function TabWorkflow() {
   );
 }
 
-function TabPratiche() {
+function TabPratiche({ commessaIdGlobale, onCambiaCommessa }) {
   const [stati, setStati] = useState(() => Object.fromEntries(PRATICHE.map((p,i) => [i, "—"])));
   const [filtroP, setFiltroP] = useState("TUTTE");
+  const [commesse, setCommesse] = useState([]);
+  const [commessaId, setCommessaId] = useState(commessaIdGlobale || "");
+  const [caricamentoCommesse, setCaricamentoCommesse] = useState(true);
+  const [documentiPerVoce, setDocumentiPerVoce] = useState({}); // voce -> [ {nome_file, riassunto, dati_chiave, data_caricamento}, ... ]
+  const [caricamentoDocumenti, setCaricamentoDocumenti] = useState(false);
+  const [erroreDocumenti, setErroreDocumenti] = useState("");
+  const [voceSelezionata, setVoceSelezionata] = useState(null); // testo voce mostrata nel pannello dettaglio
+  const [rimozioneInCorso, setRimozioneInCorso] = useState(null); // id del documento in fase di rimozione, per disabilitare il pulsante
+  const [erroreRimozione, setErroreRimozione] = useState("");
 
   const cats = [...new Set(PRATICHE.map(p=>p.categoria))];
-  const pctSi = Math.round((Object.values(stati).filter(v=>v==="SI").length / PRATICHE.length)*100);
+
+  // Carica l'elenco commesse una sola volta
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase.from("commesse").select("*").order("created_at", { ascending:false });
+      if (!error && data) setCommesse(data);
+      setCaricamentoCommesse(false);
+    })();
+  }, []);
+
+  // Sincronizza con la selezione globale (es. se cambiata da un altro tab)
+  useEffect(() => {
+    if (commessaIdGlobale !== undefined && commessaIdGlobale !== commessaId) {
+      setCommessaId(commessaIdGlobale || "");
+    }
+  }, [commessaIdGlobale]);
+
+  const selezionaCommessaLocale = (id) => {
+    setCommessaId(id);
+    onCambiaCommessa?.(id || null);
+  };
+
+  // Ogni volta che cambia la commessa, carica da Supabase tutti i documenti
+  // collegati a voci della checklist per quella commessa, raggruppati per voce.
+  useEffect(() => {
+    if (!commessaId) {
+      setDocumentiPerVoce({});
+      setVoceSelezionata(null);
+      return;
+    }
+    (async () => {
+      setCaricamentoDocumenti(true);
+      setErroreDocumenti("");
+      try {
+        const { data, error } = await supabase
+          .from("pratiche_amministrative_doc")
+          .select("*")
+          .eq("commessa_id", commessaId)
+          .order("data_caricamento", { ascending:false });
+        if (error) throw error;
+        const raggruppati = {};
+        (data || []).forEach(riga => {
+          if (!raggruppati[riga.voce]) raggruppati[riga.voce] = [];
+          raggruppati[riga.voce].push(riga);
+        });
+        setDocumentiPerVoce(raggruppati);
+      } catch (e) {
+        setErroreDocumenti(e.message || "Errore durante il caricamento dei documenti collegati.");
+      } finally {
+        setCaricamentoDocumenti(false);
+      }
+    })();
+  }, [commessaId]);
+
+  // Stato effettivo di una voce: se ha almeno un documento collegato da
+  // Supabase, è automaticamente "presente" (spunta verde), indipendentemente
+  // dal ciclo manuale — che resta utile per segnare NO / NP sulle voci senza
+  // documento collegato.
+  const statoEffettivo = (idx, voce) => {
+    if (documentiPerVoce[voce]?.length > 0) return "PRESENTE";
+    return stati[idx];
+  };
+
+  const pctSi = Math.round((PRATICHE.filter((p,i) => statoEffettivo(i,p.voce) === "PRESENTE" || statoEffettivo(i,p.voce) === "SI").length / PRATICHE.length)*100);
 
   const cycle = (i) => setStati(s => ({ ...s, [i]: s[i]==="—"?"SI":s[i]==="SI"?"NO":s[i]==="NO"?"NP":"—" }));
-  const STATUS_STYLE = { "SI":{ bg:"#14532d", color:"#86efac" }, "NO":{ bg:"#450a0a", color:"#fca5a5" }, "NP":{ bg:"#1e293b", color:"#7dd3fc" }, "—":{ bg:"#0f172a", color:"#475569" } };
+  const STATUS_STYLE = { "PRESENTE":{ bg:"#14532d", color:"#86efac" }, "SI":{ bg:"#14532d", color:"#86efac" }, "NO":{ bg:"#450a0a", color:"#fca5a5" }, "NP":{ bg:"#1e293b", color:"#7dd3fc" }, "—":{ bg:"#0f172a", color:"#475569" } };
+
+  // Rimuove un collegamento documento-voce sbagliato (es. l'AI ha riconosciuto
+  // male il documento). Se era l'unico documento della voce, la voce torna
+  // al ciclo manuale —/SI/NO/NP come prima del collegamento.
+  const rimuoviCollegamento = async (doc) => {
+    setRimozioneInCorso(doc.id);
+    setErroreRimozione("");
+    try {
+      const { error } = await supabase.from("pratiche_amministrative_doc").delete().eq("id", doc.id);
+      if (error) throw error;
+      setDocumentiPerVoce(prev => {
+        const aggiornato = { ...prev };
+        const rimasti = (aggiornato[doc.voce] || []).filter(d => d.id !== doc.id);
+        if (rimasti.length > 0) aggiornato[doc.voce] = rimasti;
+        else delete aggiornato[doc.voce];
+        return aggiornato;
+      });
+      // Se non restano altri documenti per questa voce, chiude il pannello dettaglio
+      setVoceSelezionata(prev => {
+        const rimasti = documentiPerVoce[doc.voce]?.filter(d => d.id !== doc.id) || [];
+        return rimasti.length > 0 ? prev : null;
+      });
+    } catch (e) {
+      setErroreRimozione(e.message || "Errore durante la rimozione del collegamento.");
+    } finally {
+      setRimozioneInCorso(null);
+    }
+  };
+
+  const docVoceSelezionata = voceSelezionata ? documentiPerVoce[voceSelezionata] : null;
 
   return (
-    <div>
-      <div style={{ display:"flex", gap:16, marginBottom:20, flexWrap:"wrap" }}>
-        {["TUTTE","ASSOLUTA","ALTA","MEDIA","BASSA"].map(f=>(
-          <button key={f} onClick={()=>setFiltroP(f)}
-            style={{ background:filtroP===f?"#1d4ed8":"#1e293b", color:filtroP===f?"#fff":"#94a3b8", border:`1px solid ${filtroP===f?"#3b82f6":"#334155"}`, borderRadius:8, padding:"5px 12px", fontSize:"0.78rem", cursor:"pointer" }}>
-            {f}
-          </button>
-        ))}
-        <span style={{ marginLeft:"auto", color:"#94a3b8", fontSize:"0.85rem", alignSelf:"center" }}>
-          ✅ {Object.values(stati).filter(v=>v==="SI").length} / {PRATICHE.length} — {pctSi}%
-        </span>
+    <div style={{ display:"grid", gridTemplateColumns: docVoceSelezionata ? "1fr 1.1fr" : "1fr", gap:20 }}>
+      <div>
+        {/* selettore commessa */}
+        <div style={{ marginBottom:16 }}>
+          <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Commessa</label>
+          <select
+            value={commessaId}
+            onChange={e => selezionaCommessaLocale(e.target.value)}
+            style={{ background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.9rem", cursor:"pointer" }}
+          >
+            <option value="">Seleziona una commessa…</option>
+            {commesse.map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}
+          </select>
+          {caricamentoCommesse && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Caricamento elenco commesse…</div>}
+          {!commessaId && !caricamentoCommesse && <div style={{ color:"#64748b", fontSize:"0.78rem", marginTop:6 }}>Seleziona una commessa per vedere quali documenti sono già stati collegati automaticamente dal tab Documenti.</div>}
+          {caricamentoDocumenti && <div style={{ color:"#7dd3fc", fontSize:"0.78rem", marginTop:6 }}>⏳ Caricamento documenti collegati…</div>}
+          {erroreDocumenti && <div style={{ color:"#fca5a5", fontSize:"0.78rem", marginTop:6 }}>{erroreDocumenti}</div>}
+        </div>
+
+        <div style={{ display:"flex", gap:16, marginBottom:20, flexWrap:"wrap" }}>
+          {["TUTTE","ASSOLUTA","ALTA","MEDIA","BASSA"].map(f=>(
+            <button key={f} onClick={()=>setFiltroP(f)}
+              style={{ background:filtroP===f?"#1d4ed8":"#1e293b", color:filtroP===f?"#fff":"#94a3b8", border:`1px solid ${filtroP===f?"#3b82f6":"#334155"}`, borderRadius:8, padding:"5px 12px", fontSize:"0.78rem", cursor:"pointer" }}>
+              {f}
+            </button>
+          ))}
+          <span style={{ marginLeft:"auto", color:"#94a3b8", fontSize:"0.85rem", alignSelf:"center" }}>
+            ✅ {PRATICHE.filter((p,i) => statoEffettivo(i,p.voce) === "PRESENTE" || statoEffettivo(i,p.voce) === "SI").length} / {PRATICHE.length} — {pctSi}%
+          </span>
+        </div>
+
+        {cats.map(cat => {
+          const items = PRATICHE.filter((p,i)=> p.categoria===cat && (filtroP==="TUTTE"||p.priorita===filtroP));
+          if (!items.length) return null;
+          return (
+            <div key={cat} style={{ marginBottom:20 }}>
+              <div style={{ color:"#7dd3fc", fontSize:"0.78rem", fontWeight:700, letterSpacing:"0.08em", marginBottom:8, paddingBottom:6, borderBottom:"1px solid #1e3a5f" }}>{cat}</div>
+              {items.map((p) => {
+                const idx = PRATICHE.indexOf(p);
+                const s = statoEffettivo(idx, p.voce);
+                const ss = STATUS_STYLE[s];
+                const haDocumenti = documentiPerVoce[p.voce]?.length > 0;
+                return (
+                  <div key={idx}
+                    onClick={() => haDocumenti && setVoceSelezionata(p.voce)}
+                    style={{ display:"flex", alignItems:"center", gap:12, background: voceSelezionata===p.voce?"#1e3a5f":"#1e293b", border:`1px solid ${voceSelezionata===p.voce?"#3b82f6":"#334155"}`, borderRadius:8, padding:"10px 14px", marginBottom:5, cursor: haDocumenti ? "pointer" : "default" }}>
+                    <PrioritaBadge p={p.priorita} />
+                    <span style={{ flex:1, color:"#cbd5e1", fontSize:"0.88rem" }}>
+                      {p.voce}
+                      {haDocumenti && <span style={{ color:"#475569", fontSize:"0.75rem" }}> — {documentiPerVoce[p.voce].length} doc. collegato{documentiPerVoce[p.voce].length>1?"i":""} 👁</span>}
+                    </span>
+                    {haDocumenti ? (
+                      <span style={{ background:ss.bg, color:ss.color, border:"none", borderRadius:8, padding:"4px 14px", fontWeight:700, fontSize:"0.8rem", minWidth:44, textAlign:"center" }}>
+                        ✓
+                      </span>
+                    ) : (
+                      <button onClick={(e) => { e.stopPropagation(); cycle(idx); }}
+                        style={{ background:ss.bg, color:ss.color, border:"none", borderRadius:8, padding:"4px 14px", fontWeight:700, fontSize:"0.8rem", cursor:"pointer", minWidth:44 }}>
+                        {s}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })}
+        <p style={{ color:"#475569", fontSize:"0.78rem", marginTop:8 }}>Le voci con un documento collegato dal tab Documenti si spuntano automaticamente (clicca per i dettagli). Per le altre, clicca sul pulsante per ciclare: — → SI → NO → NP.</p>
       </div>
 
-      {cats.map(cat => {
-        const items = PRATICHE.filter((p,i)=> p.categoria===cat && (filtroP==="TUTTE"||p.priorita===filtroP));
-        if (!items.length) return null;
-        return (
-          <div key={cat} style={{ marginBottom:20 }}>
-            <div style={{ color:"#7dd3fc", fontSize:"0.78rem", fontWeight:700, letterSpacing:"0.08em", marginBottom:8, paddingBottom:6, borderBottom:"1px solid #1e3a5f" }}>{cat}</div>
-            {items.map((p) => {
-              const idx = PRATICHE.indexOf(p);
-              const s = stati[idx];
-              const ss = STATUS_STYLE[s];
-              return (
-                <div key={idx} style={{ display:"flex", alignItems:"center", gap:12, background:"#1e293b", border:"1px solid #334155", borderRadius:8, padding:"10px 14px", marginBottom:5 }}>
-                  <PrioritaBadge p={p.priorita} />
-                  <span style={{ flex:1, color:"#cbd5e1", fontSize:"0.88rem" }}>{p.voce}</span>
-                  <button onClick={()=>cycle(idx)}
-                    style={{ background:ss.bg, color:ss.color, border:"none", borderRadius:8, padding:"4px 14px", fontWeight:700, fontSize:"0.8rem", cursor:"pointer", minWidth:44 }}>
-                    {s}
-                  </button>
-                </div>
-              );
-            })}
+      {/* pannello dettaglio documenti collegati */}
+      {docVoceSelezionata && (
+        <div style={{ background:"#1e293b", border:"1px solid #1e3a5f", borderRadius:12, padding:18, maxHeight:560, overflowY:"auto" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:14 }}>
+            <div>
+              <div style={{ color:"#475569", fontSize:"0.72rem", marginBottom:2 }}>VOCE CHECKLIST</div>
+              <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.95rem" }}>{voceSelezionata}</div>
+            </div>
+            <button onClick={() => setVoceSelezionata(null)} style={{ background:"none", border:"none", color:"#64748b", cursor:"pointer", fontSize:"1.1rem" }}>✕</button>
           </div>
-        );
-      })}
-      <p style={{ color:"#475569", fontSize:"0.78rem", marginTop:8 }}>Clicca sul pulsante per ciclare: — → SI → NO → NP</p>
+          {erroreRimozione && <div style={{ color:"#fca5a5", fontSize:"0.78rem", marginBottom:10 }}>{erroreRimozione}</div>}
+          {docVoceSelezionata.map((doc, i) => (
+            <div key={i} style={{ background:"#0f172a", border:"1px solid #334155", borderRadius:10, padding:14, marginBottom:10 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+                <div style={{ color:"#e2e8f0", fontWeight:600, fontSize:"0.88rem", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>📄 {doc.nome_file}</div>
+              </div>
+              <div style={{ color:"#475569", fontSize:"0.72rem", marginBottom:8 }}>Caricato il {new Date(doc.data_caricamento).toLocaleString("it-IT")}</div>
+              {doc.riassunto && (
+                <div style={{ marginBottom:8 }}>
+                  <div style={{ color:"#94a3b8", fontSize:"0.72rem", fontWeight:700, marginBottom:2 }}>RIASSUNTO</div>
+                  <div style={{ color:"#cbd5e1", fontSize:"0.82rem", lineHeight:1.5 }}>{doc.riassunto}</div>
+                </div>
+              )}
+              {doc.dati_chiave && (
+                <div style={{ marginBottom:10 }}>
+                  <div style={{ color:"#94a3b8", fontSize:"0.72rem", fontWeight:700, marginBottom:2 }}>DATI CHIAVE</div>
+                  <div style={{ color:"#cbd5e1", fontSize:"0.82rem", lineHeight:1.5 }}>{doc.dati_chiave}</div>
+                </div>
+              )}
+              <button
+                onClick={() => rimuoviCollegamento(doc)}
+                disabled={rimozioneInCorso === doc.id}
+                style={{ background:"#450a0a22", color:"#fca5a5", border:"1px solid #ef444433", borderRadius:6, padding:"5px 12px", cursor: rimozioneInCorso===doc.id ? "not-allowed":"pointer", fontSize:"0.75rem", fontWeight:700, opacity: rimozioneInCorso===doc.id ? 0.6 : 1 }}>
+                {rimozioneInCorso === doc.id ? "Rimozione…" : "✕ Rimuovi collegamento (documento sbagliato)"}
+              </button>
+            </div>
+          ))}
+          <p style={{ color:"#475569", fontSize:"0.72rem", marginTop:4 }}>Per consultare il file originale, vai nella cartella DOC INIZIALE/DOC FONDAMENTALI su Google Drive.</p>
+        </div>
+      )}
     </div>
   );
 }
@@ -1875,14 +2049,18 @@ function TabDocumenti({ commessaIdGlobale, onCambiaCommessa }) {
       const contestoPeriodo = periodoLeggibile
         ? `\n\nIl periodo cantiere di questa commessa inizia in: ${periodoLeggibile}. Usa questa informazione SOLO per le pratiche edilizie: se trovi una data nel documento (es. data del protocollo, data del titolo abilitativo) ANTERIORE a questo periodo, è documentazione storica/pregressa e va in DOC INIZIALE/DOC FONDAMENTALI; se la data è pari o successiva, è una pratica nuova relativa a questo cantiere e va in PRATICHE EDILIZIE/INIZIO LAVORI o FINE LAVORI secondo il contenuto.`
         : `\n\nNota: non è stato indicato un periodo cantiere per questa commessa, quindi per le pratiche edilizie usa il buon senso guardando il contesto generale del documento (se sembra riferirsi a una fase storica/pregressa o a lavori in corso).`;
+      const elencoPratiche = PRATICHE.map(p => `"${p.voce}"`).join(", ");
       const promptText = `Sei un archivista esperto di pratiche edilizie e gestione commesse retail. Apri e analizza il documento allegato (file: "${item.file.name}"). Determina autonomamente di che tipo di documento si tratta guardando il contenuto, non solo il nome del file.
 
 Devi scegliere UNA SOLA cartella di destinazione tra questo elenco esatto (rispondi usando esattamente uno di questi percorsi, copiato identico):
 ${elencoCartelle}${contestoPeriodo}
 
+Se la cartella scelta è "DOC INIZIALE/DOC FONDAMENTALI", verifica anche se il documento corrisponde esattamente a una di queste voci della checklist pratiche amministrative: ${elencoPratiche}. Se sei RAGIONEVOLMENTE SICURO della corrispondenza, riporta il testo esatto della voce nel campo "pratica_voce" (copiato identico dall'elenco). Se non sei sicuro, o il documento non corrisponde chiaramente a nessuna voce, lascia "pratica_voce" vuoto: è preferibile lasciarlo vuoto piuttosto che indicare una voce sbagliata.
+
 Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backtick, con questa struttura esatta:
 {
   "cartella": "il percorso esatto copiato dall'elenco",
+  "pratica_voce": "il testo esatto della voce della checklist, oppure stringa vuota se non applicabile o non sicuro",
   "motivazione": "breve spiegazione di massimo 2 frasi sul perché questo documento va in quella cartella",
   "riassunto": "riassunto del contenuto del documento in 2-3 frasi",
   "dati_chiave": "eventuali dati importanti trovati: date, importi, nomi, misure (se non ce ne sono scrivi 'Nessun dato rilevante')",
@@ -1912,11 +2090,18 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
       const parsed = JSON.parse(testo);
 
       const cartellaValida = STRUTTURA_ARCHIVIO.find(c => c.path === parsed.cartella)?.path || "DOC INIZIALE/DOC ACCESSORI";
+      // Verifica che la voce indicata dall'AI corrisponda esattamente a una
+      // voce conosciuta della checklist; se non corrisponde (o l'AI l'ha
+      // lasciata vuota perché non sicura) resta null e non viene collegata.
+      const praticaVoceValida = parsed.pratica_voce && PRATICHE.find(p => p.voce === parsed.pratica_voce)
+        ? parsed.pratica_voce
+        : null;
 
       setItems(prev => prev.map(i => i.id === item.id ? {
         ...i,
         status: "done",
         cartella: cartellaValida,
+        praticaVoce: praticaVoceValida,
         motivazione: parsed.motivazione || "",
         riassunto: parsed.riassunto || "",
         datiChiave: parsed.dati_chiave || "",
@@ -1933,6 +2118,19 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
       // salva automaticamente nel Budget HP INV della commessa selezionata.
       if (cartellaValida === "HP INVESTIMENTO" && commessaSelezionata) {
         salvaBudgetSuSupabase({ ...item, cartella: cartellaValida });
+      }
+
+      // Se l'AI ha riconosciuto con sicurezza una voce della checklist
+      // Pratiche Amministrative, registra il collegamento su Supabase: la
+      // voce comparirà spuntata nel tab Pratiche Amm. con il documento collegato.
+      if (praticaVoceValida && commessaSelezionata) {
+        await supabase.from("pratiche_amministrative_doc").insert({
+          commessa_id: commessaSelezionata.id,
+          voce: praticaVoceValida,
+          nome_file: item.file.name,
+          riassunto: parsed.riassunto || "",
+          dati_chiave: parsed.dati_chiave || "",
+        });
       }
     } catch (e) {
       setItems(prev => prev.map(i => i.id === item.id ? { ...i, status:"error", errore: e.message } : i));
@@ -2108,6 +2306,20 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
                 )}
               </div>
             )}
+
+            {selected.cartella === "DOC INIZIALE/DOC FONDAMENTALI" && (
+              <div style={{ marginTop:14 }}>
+                {selected.praticaVoce ? (
+                  <div style={{ background:"#14532d22", border:"1px solid #22c55e33", borderRadius:8, padding:"10px 14px", color:"#86efac", fontSize:"0.82rem" }}>
+                    ✓ Collegato alla voce "{selected.praticaVoce}" della checklist Pratiche Amm. — comparirà spuntata in quel tab.
+                  </div>
+                ) : (
+                  <div style={{ background:"#1e293b", border:"1px solid #334155", borderRadius:8, padding:"10px 14px", color:"#94a3b8", fontSize:"0.82rem" }}>
+                    L'AI non ha trovato una corrispondenza sicura con una voce della checklist Pratiche Amm. Se questo documento copre una voce specifica, spuntala manualmente in quel tab.
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -2197,7 +2409,7 @@ export default function App() {
       <div style={{ maxWidth:1100, margin:"0 auto", padding:"28px 24px" }}>
         {tab==="scheda"   && <TabScheda commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} />}
         {tab==="workflow" && <TabWorkflow />}
-        {tab==="pratiche" && <TabPratiche />}
+        {tab==="pratiche" && <TabPratiche commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} />}
         {tab==="budget"   && <TabBudget commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} />}
         {tab==="ai"       && <TabAnalisiAI />}
         {tab==="pdf"      && <TabEditorPDF />}
