@@ -429,28 +429,134 @@ function PrioritaBadge({ p }) {
 
 // ── TABS ──────────────────────────────────────────────────────────────────────
 
-function TabWorkflow() {
+function TabWorkflow({ commessaIdGlobale, onCambiaCommessa }) {
   const [faseFiltro, setFaseFiltro] = useState("TUTTE");
-  const [stati, setStati] = useState(() => Object.fromEntries(WORKFLOW.map(w => [w.id, false])));
   const [searchQ, setSearchQ] = useState("");
+  const [commesse, setCommesse] = useState([]);
+  const [commessaId, setCommessaId] = useState(commessaIdGlobale || "");
+  const [caricamentoCommesse, setCaricamentoCommesse] = useState(true);
+  const [filtroBrand, setFiltroBrand] = useState("TUTTI");
+  const [completati, setCompletati] = useState(new Set()); // Set di workflow_id completati per la commessa selezionata
+  const [caricamentoStati, setCaricamentoStati] = useState(false);
+  const [erroreStati, setErroreStati] = useState("");
+  const [aggiornamentoInCorso, setAggiornamentoInCorso] = useState(null); // workflow_id in fase di toggle, per disabilitare il click doppio
+
+  const commesseFiltrate = filtroBrand === "TUTTI" ? commesse : commesse.filter(c => c.brand === filtroBrand);
+
+  // Carica l'elenco commesse una sola volta
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase.from("commesse").select("*").order("created_at", { ascending:false });
+      if (!error && data) setCommesse(data);
+      setCaricamentoCommesse(false);
+    })();
+  }, []);
+
+  // Sincronizza con la selezione globale (es. se cambiata da un altro tab)
+  useEffect(() => {
+    if (commessaIdGlobale !== undefined && commessaIdGlobale !== commessaId) {
+      setCommessaId(commessaIdGlobale || "");
+    }
+  }, [commessaIdGlobale]);
+
+  const selezionaCommessaLocale = (id) => {
+    setCommessaId(id);
+    onCambiaCommessa?.(id || null);
+  };
+
+  // Ogni volta che cambia la commessa, carica da Supabase quali attività
+  // sono già state completate per quella commessa.
+  useEffect(() => {
+    if (!commessaId) {
+      setCompletati(new Set());
+      return;
+    }
+    (async () => {
+      setCaricamentoStati(true);
+      setErroreStati("");
+      try {
+        const { data, error } = await supabase
+          .from("workflow_completato")
+          .select("workflow_id")
+          .eq("commessa_id", commessaId);
+        if (error) throw error;
+        setCompletati(new Set((data || []).map(r => r.workflow_id)));
+      } catch (e) {
+        setErroreStati(e.message || "Errore durante il caricamento dello stato del workflow.");
+      } finally {
+        setCaricamentoStati(false);
+      }
+    })();
+  }, [commessaId]);
 
   const filtered = WORKFLOW.filter(w =>
     (faseFiltro === "TUTTE" || w.fase === faseFiltro) &&
     (w.titolo.toLowerCase().includes(searchQ.toLowerCase()) || w.da.toLowerCase().includes(searchQ.toLowerCase()) || w.a.toLowerCase().includes(searchQ.toLowerCase()))
   );
 
-  const completati = Object.values(stati).filter(Boolean).length;
-  const pct = Math.round((completati / WORKFLOW.length) * 100);
+  const numCompletati = completati.size;
+  const pct = Math.round((numCompletati / WORKFLOW.length) * 100);
 
-  const toggle = (id) => setStati(s => ({ ...s, [id]: !s[id] }));
+  // Spunta/togli un'attività: inserisce o elimina la riga corrispondente su
+  // Supabase, così lo stato resta sempre legato alla commessa selezionata e
+  // persistente tra sessioni.
+  const toggle = async (workflowId) => {
+    if (!commessaId) return;
+    setAggiornamentoInCorso(workflowId);
+    const eraCompletato = completati.has(workflowId);
+    try {
+      if (eraCompletato) {
+        const { error } = await supabase.from("workflow_completato").delete().eq("commessa_id", commessaId).eq("workflow_id", workflowId);
+        if (error) throw error;
+        setCompletati(prev => { const next = new Set(prev); next.delete(workflowId); return next; });
+      } else {
+        const { error } = await supabase.from("workflow_completato").insert({ commessa_id: commessaId, workflow_id: workflowId });
+        if (error) throw error;
+        setCompletati(prev => new Set(prev).add(workflowId));
+      }
+    } catch (e) {
+      setErroreStati(e.message || "Errore durante l'aggiornamento dello stato.");
+    } finally {
+      setAggiornamentoInCorso(null);
+    }
+  };
 
   return (
     <div>
+      {/* selettore brand + commessa */}
+      <div style={{ marginBottom:20 }}>
+        <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Brand</label>
+        <select
+          value={filtroBrand}
+          onChange={e => setFiltroBrand(e.target.value)}
+          style={{ background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.9rem", cursor:"pointer", marginBottom:10 }}
+        >
+          <option value="TUTTI">Tutti i brand</option>
+          {BRAND_LIST.map(b => <option key={b} value={b}>{b}</option>)}
+        </select>
+        <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Commessa</label>
+        <select
+          value={commessaId}
+          onChange={e => selezionaCommessaLocale(e.target.value)}
+          style={{ background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.9rem", cursor:"pointer" }}
+        >
+          <option value="">Seleziona una commessa…</option>
+          {commesseFiltrate.map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}
+        </select>
+        {caricamentoCommesse && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Caricamento elenco commesse…</div>}
+        {!caricamentoCommesse && commesseFiltrate.length === 0 && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Nessuna commessa trovata per questo brand.</div>}
+        {!commessaId && !caricamentoCommesse && <div style={{ color:"#64748b", fontSize:"0.78rem", marginTop:6 }}>Seleziona una commessa per vedere e aggiornare l'avanzamento del workflow.</div>}
+        {caricamentoStati && <div style={{ color:"#7dd3fc", fontSize:"0.78rem", marginTop:6 }}>⏳ Caricamento avanzamento…</div>}
+        {erroreStati && <div style={{ color:"#fca5a5", fontSize:"0.78rem", marginTop:6 }}>{erroreStati}</div>}
+      </div>
+
+      {commessaId && (
+      <>
       {/* progress bar */}
       <div style={{ marginBottom:24 }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
           <span style={{ color:"#94a3b8", fontSize:"0.85rem" }}>Avanzamento complessivo</span>
-          <span style={{ color:"#e2e8f0", fontWeight:700 }}>{completati} / {WORKFLOW.length} attività — {pct}%</span>
+          <span style={{ color:"#e2e8f0", fontWeight:700 }}>{numCompletati} / {WORKFLOW.length} attività — {pct}%</span>
         </div>
         <div style={{ background:"#1e293b", borderRadius:99, height:8 }}>
           <div style={{ background:"linear-gradient(90deg,#3b82f6,#06b6d4)", borderRadius:99, height:8, width:`${pct}%`, transition:"width 0.4s" }} />
@@ -476,7 +582,7 @@ function TabWorkflow() {
       {FASI.filter(f => faseFiltro === "TUTTE" || f === faseFiltro).map(fase => {
         const items = filtered.filter(w => w.fase === fase);
         if (!items.length) return null;
-        const doneInFase = items.filter(w => stati[w.id]).length;
+        const doneInFase = items.filter(w => completati.has(w.id)).length;
         return (
           <div key={fase} style={{ marginBottom:24 }}>
             <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:10 }}>
@@ -485,29 +591,34 @@ function TabWorkflow() {
               <span style={{ color:"#475569", fontSize:"0.75rem" }}>{doneInFase}/{items.length}</span>
               <div style={{ height:2, flex:1, background:"#334155" }} />
             </div>
-            {items.map(w => (
-              <div key={w.id} onClick={()=>toggle(w.id)}
-                style={{ display:"flex", alignItems:"flex-start", gap:12, background: stati[w.id]?"#0f172a":"#1e293b", border:`1px solid ${stati[w.id]?"#1d4ed8":"#334155"}`, borderRadius:10, padding:"12px 14px", marginBottom:6, cursor:"pointer", transition:"border-color 0.2s, background 0.2s" }}>
-                {/* checkbox */}
-                <div style={{ width:20, height:20, borderRadius:6, border:`2px solid ${stati[w.id]?"#3b82f6":"#475569"}`, background:stati[w.id]?"#3b82f6":"transparent", flexShrink:0, marginTop:1, display:"flex", alignItems:"center", justifyContent:"center" }}>
-                  {stati[w.id] && <svg width="11" height="9" viewBox="0 0 11 9" fill="none"><path d="M1 4.5L4 7.5L10 1" stroke="white" strokeWidth="2" strokeLinecap="round"/></svg>}
-                </div>
-                <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginBottom:4 }}>
-                    <span style={{ color: stati[w.id]?"#64748b":"#e2e8f0", fontWeight:600, fontSize:"0.9rem", textDecoration:stati[w.id]?"line-through":"none" }}>{w.titolo}</span>
-                    <Badge tipo={w.tipo} />
+            {items.map(w => {
+              const fatto = completati.has(w.id);
+              return (
+                <div key={w.id} onClick={()=> aggiornamentoInCorso!==w.id && toggle(w.id)}
+                  style={{ display:"flex", alignItems:"flex-start", gap:12, background: fatto?"#0f172a":"#1e293b", border:`1px solid ${fatto?"#1d4ed8":"#334155"}`, borderRadius:10, padding:"12px 14px", marginBottom:6, cursor: aggiornamentoInCorso===w.id ? "wait" : "pointer", transition:"border-color 0.2s, background 0.2s", opacity: aggiornamentoInCorso===w.id ? 0.6 : 1 }}>
+                  {/* checkbox */}
+                  <div style={{ width:20, height:20, borderRadius:6, border:`2px solid ${fatto?"#3b82f6":"#475569"}`, background:fatto?"#3b82f6":"transparent", flexShrink:0, marginTop:1, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                    {fatto && <svg width="11" height="9" viewBox="0 0 11 9" fill="none"><path d="M1 4.5L4 7.5L10 1" stroke="white" strokeWidth="2" strokeLinecap="round"/></svg>}
                   </div>
-                  <div style={{ display:"flex", gap:12, flexWrap:"wrap", fontSize:"0.78rem", color:"#64748b" }}>
-                    {w.da && <span>📤 {w.da}</span>}
-                    {w.a  && <span>📥 {w.a}</span>}
-                    {w.automazione && <span style={{ color:"#475569" }}>⚡ {w.automazione}</span>}
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginBottom:4 }}>
+                      <span style={{ color: fatto?"#64748b":"#e2e8f0", fontWeight:600, fontSize:"0.9rem", textDecoration:fatto?"line-through":"none" }}>{w.titolo}</span>
+                      <Badge tipo={w.tipo} />
+                    </div>
+                    <div style={{ display:"flex", gap:12, flexWrap:"wrap", fontSize:"0.78rem", color:"#64748b" }}>
+                      {w.da && <span>📤 {w.da}</span>}
+                      {w.a  && <span>📥 {w.a}</span>}
+                      {w.automazione && <span style={{ color:"#475569" }}>⚡ {w.automazione}</span>}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         );
       })}
+      </>
+      )}
     </div>
   );
 }
@@ -2501,7 +2612,7 @@ export default function App() {
       {/* content */}
       <div style={{ maxWidth:1100, margin:"0 auto", padding:"28px 24px" }}>
         {tab==="scheda"   && <TabScheda commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} />}
-        {tab==="workflow" && <TabWorkflow />}
+        {tab==="workflow" && <TabWorkflow commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} />}
         {tab==="pratiche" && <TabPratiche commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} />}
         {tab==="budget"   && <TabBudget commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} />}
         {tab==="ai"       && <TabAnalisiAI />}
