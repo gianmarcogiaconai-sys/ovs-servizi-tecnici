@@ -114,10 +114,24 @@ const richiediTokenDrive = () => new Promise(async (resolve, reject) => {
     await loadGoogleIdentityScript();
   } catch (e) { reject(e); return; }
 
+  // Timeout di sicurezza: se il popup di accesso Google viene bloccato dal
+  // browser o non arriva mai una risposta (silenziosamente, senza errore),
+  // senza questo timeout la richiesta resterebbe bloccata per sempre.
+  let risolta = false;
+  const timeoutId = setTimeout(() => {
+    if (!risolta) {
+      risolta = true;
+      reject(new Error("Richiesta di accesso a Google Drive scaduta: controlla che il browser non abbia bloccato il popup, poi riprova."));
+    }
+  }, 30000);
+
   const client = window.google.accounts.oauth2.initTokenClient({
     client_id: GOOGLE_CLIENT_ID,
     scope: DRIVE_SCOPE,
     callback: (response) => {
+      if (risolta) return;
+      risolta = true;
+      clearTimeout(timeoutId);
       if (response.error) { reject(new Error("Accesso a Google Drive negato o annullato.")); return; }
       setStoredDriveToken(response.access_token, response.expires_in || 3600);
       resolve(response.access_token);
@@ -128,10 +142,21 @@ const richiediTokenDrive = () => new Promise(async (resolve, reject) => {
 
 const driveFetch = async (url, options = {}) => {
   const token = await richiediTokenDrive();
-  const res = await fetch(url, {
-    ...options,
-    headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` },
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  let res;
+  try {
+    res = await fetch(url, {
+      ...options,
+      headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    });
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error("La richiesta a Google Drive non ha risposto in tempo. Controlla la connessione e riprova.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (res.status === 401) {
     // token scaduto o revocato: lo scartiamo e propaghiamo l'errore per un nuovo tentativo
     clearStoredDriveToken();
