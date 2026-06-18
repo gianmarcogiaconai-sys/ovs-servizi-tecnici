@@ -26,6 +26,8 @@ const SOTTOCARTELLE_COMMESSA = [
   "PROGETTI IMPIANTI/VVF",
   "PROGETTI ST",
   "COMPUTI",
+  "HP INVESTIMENTO",
+  "CRONOPROGRAMMA",
   "CONTABILITA'",
   "PRATICHE EDILIZIE/INIZIO LAVORI",
   "PRATICHE EDILIZIE/FINE LAVORI",
@@ -48,6 +50,8 @@ const CARTELLE_CON_SOTTOCARTELLA_DATA = new Set([
   "PROGETTI IMPIANTI/ELETTRICO",
   "PROGETTI IMPIANTI/VVF",
   "COMPUTI",
+  "HP INVESTIMENTO",
+  "CRONOPROGRAMMA",
   "SOPRALLUOGHI/REPORT",
   "FOTO/FOTO INIZIALI",
   "FOTO/FOTO CANTIERE",
@@ -60,6 +64,17 @@ const dataDiOggiPerCartella = () => {
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 };
+
+// Carica la libreria SheetJS via CDN per leggere file Excel/CSV nel browser.
+// Condivisa tra il tab Documenti (classificazione AI) e il tab Budget (import HP INV).
+const loadSheetJS = () => new Promise((resolve, reject) => {
+  if (window.XLSX) { resolve(window.XLSX); return; }
+  const script = document.createElement("script");
+  script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+  script.onload = () => resolve(window.XLSX);
+  script.onerror = () => reject(new Error("Impossibile caricare il lettore Excel"));
+  document.head.appendChild(script);
+});
 
 const getStoredDriveToken = () => {
   try {
@@ -352,6 +367,17 @@ function fmtEur(v) {
   return new Intl.NumberFormat("it-IT", { style:"currency", currency:"EUR", maximumFractionDigits:0 }).format(v);
 }
 
+const NOMI_MESI = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
+
+// Formatta il periodo cantiere, salvato come "AAAA-MM", in forma leggibile
+// (es. "Giugno 2026"). Usata nel riepilogo della Scheda Negozio.
+function formattaPeriodo(periodo) {
+  if (!periodo || !periodo.includes("-")) return periodo || "";
+  const [anno, mese] = periodo.split("-");
+  const nomeMese = NOMI_MESI[Number(mese) - 1];
+  return nomeMese ? `${nomeMese} ${anno}` : periodo;
+}
+
 // ── COMPONENTS ────────────────────────────────────────────────────────────────
 
 function Badge({ tipo }) {
@@ -510,9 +536,73 @@ function TabPratiche() {
   );
 }
 
-function TabBudget() {
+// Legge un file .xls/.xlsx di ipotesi di investimento HP INV e ne estrae i
+// valori Standard ed Extra capitolato per ciascuna voce numerata, riconoscendo
+// il numero in colonna B e verificando che l'etichetta in colonna C corrisponda
+// davvero alla voce nota (gestisce file con numeri duplicati in sezioni diverse,
+// es. "NORMALE GESTIONE" con valori a zero, e abbreviazioni come "IMP." per "IMPIANTI").
+// Condivisa tra TabBudget (import manuale) e TabDocumenti (import automatico
+// quando un file viene classificato come HP INVESTIMENTO).
+const estraiValoriBudgetDaFile = async (file) => {
+  const XLSX = await loadSheetJS();
+  const buffer = await file.arrayBuffer();
+  const wb = XLSX.read(buffer, { type: "array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+
+  const normalizza = (v) => v == null ? "" : String(v).trim().toUpperCase().replace(/\s+/g, " ");
+
+  const valori = {};
+  const trovate = [];
+  rows.forEach(riga => {
+    const numeroCella = normalizza(riga[1]); // colonna B (indice 1)
+    if (!numeroCella || trovate.includes(numeroCella)) return;
+    const vocePerNumero = BUDGET_VOCI.find(v => normalizza(v.n) === numeroCella);
+    if (!vocePerNumero) return;
+
+    const etichettaFile = normalizza(riga[2]); // colonna C (indice 2)
+    const etichettaApp = normalizza(vocePerNumero.voce);
+    const pulisci = (s) => s.replace(/[.,'’]/g, "").replace(/\s+/g, " ").trim();
+    const fileSenzaPunt = pulisci(etichettaFile);
+    const appSenzaPunt = pulisci(etichettaApp);
+    const primaParolaFile = fileSenzaPunt.split(" ")[0] || "";
+    const primaParolaApp = appSenzaPunt.split(" ")[0] || "";
+    const prefissoComune = (a, b) => a && b && (a.startsWith(b.slice(0,5)) || b.startsWith(a.slice(0,5)));
+    const corrispondeEtichetta = etichettaFile && etichettaApp && (
+      prefissoComune(primaParolaFile, primaParolaApp) ||
+      fileSenzaPunt.includes(appSenzaPunt.split(" ")[0]) ||
+      appSenzaPunt.includes(fileSenzaPunt.split(" ")[0])
+    );
+    if (!corrispondeEtichetta) return;
+
+    const std = Number(riga[8]) || 0;   // colonna I (indice 8)
+    const extra = Number(riga[11]) || 0; // colonna L (indice 11)
+    valori[vocePerNumero.n] = { std, extra };
+    trovate.push(vocePerNumero.n);
+  });
+
+  if (trovate.length === 0) throw new Error("Nessuna voce riconosciuta nel file. Verifica che sia nel formato standard HP INV.");
+
+  const nonTrovate = BUDGET_VOCI.map(v=>v.n).filter(n => !trovate.includes(n));
+  return { valori, trovate, nonTrovate };
+};
+
+const valoriVuoti = () => Object.fromEntries(BUDGET_VOCI.map(v=>v.n).map(n=>[n, { std:0, extra:0 }]));
+
+function TabBudget({ commessaIdGlobale, onCambiaCommessa }) {
+  const [commesse, setCommesse] = useState([]);
+  const [commessaId, setCommessaId] = useState(commessaIdGlobale || "");
+  const [caricamentoCommesse, setCaricamentoCommesse] = useState(true);
+  const [caricamentoBudget, setCaricamentoBudget] = useState(false);
+  const [erroreCaricamento, setErroreCaricamento] = useState("");
+  const [ultimoAggiornamento, setUltimoAggiornamento] = useState(null); // { updated_at, nome_file_origine } | null
+  const [salvataggioManuale, setSalvataggioManuale] = useState("idle"); // idle | saving | saved | error
+
   const [mqVendita, setMqVendita] = useState(0);
-  const [valori, setValori] = useState(() => Object.fromEntries(BUDGET_VOCI.map(v=>v.n).map(n=>[n, { std:0, extra:0 }])));
+  const [valori, setValori] = useState(valoriVuoti);
+  const [importStato, setImportStato] = useState("idle"); // idle | loading | done | error
+  const [importErrore, setImportErrore] = useState("");
+  const [importRiepilogo, setImportRiepilogo] = useState(null); // { trovate, nonTrovate }
 
   const setVal = (n, campo, v) => setValori(prev=>({ ...prev, [n]:{ ...prev[n], [campo]: Number(v)||0 } }));
 
@@ -524,8 +614,166 @@ function TabBudget() {
 
   const inputStyle = { background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:6, padding:"5px 8px", width:110, textAlign:"right", fontSize:"0.82rem", outline:"none" };
 
+  // Carica l'elenco commesse, una sola volta
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase.from("commesse").select("*").order("created_at", { ascending:false });
+      if (!error && data) setCommesse(data);
+      setCaricamentoCommesse(false);
+    })();
+  }, []);
+
+  // Tiene sincronizzata la selezione con lo stato globale (es. se l'utente
+  // seleziona la commessa dal tab Documenti o dalla Scheda Negozio).
+  useEffect(() => {
+    if (commessaIdGlobale !== undefined && commessaIdGlobale !== commessaId) {
+      setCommessaId(commessaIdGlobale || "");
+    }
+  }, [commessaIdGlobale]);
+
+  const selezionaCommessaLocale = (id) => {
+    setCommessaId(id);
+    onCambiaCommessa?.(id || null);
+  };
+
+  // Ogni volta che cambia la commessa selezionata, carica da Supabase
+  // l'ultima versione salvata del budget (sovrascrive sempre lo stato locale,
+  // così il tab mostra sempre l'ultima ipotesi di investimento caricata).
+  useEffect(() => {
+    if (!commessaId) {
+      setMqVendita(0);
+      setValori(valoriVuoti());
+      setUltimoAggiornamento(null);
+      setErroreCaricamento("");
+      return;
+    }
+    (async () => {
+      setCaricamentoBudget(true);
+      setErroreCaricamento("");
+      try {
+        const { data, error } = await supabase.from("budget_hp_inv").select("*").eq("commessa_id", commessaId).maybeSingle();
+        if (error) throw error;
+        if (data) {
+          setValori({ ...valoriVuoti(), ...(data.valori || {}) });
+          setMqVendita(data.mq_vendita || 0);
+          setUltimoAggiornamento({ updated_at: data.updated_at, nome_file_origine: data.nome_file_origine });
+        } else {
+          setValori(valoriVuoti());
+          setMqVendita(0);
+          setUltimoAggiornamento(null);
+        }
+      } catch (e) {
+        setErroreCaricamento(e.message || "Errore durante il caricamento del budget.");
+      } finally {
+        setCaricamentoBudget(false);
+      }
+    })();
+  }, [commessaId]);
+
+  // Salva manualmente lo stato corrente su Supabase (es. dopo modifiche a
+  // mano ai singoli importi, o per aggiornare i mq vendita), sovrascrivendo
+  // sempre l'unica riga "ultima versione" per questa commessa.
+  const salvaSuSupabase = async () => {
+    if (!commessaId) return;
+    setSalvataggioManuale("saving");
+    try {
+      const { error } = await supabase.from("budget_hp_inv").upsert({
+        commessa_id: commessaId,
+        mq_vendita: mqVendita || null,
+        valori,
+        nome_file_origine: ultimoAggiornamento?.nome_file_origine || null,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "commessa_id" });
+      if (error) throw error;
+      setUltimoAggiornamento(prev => ({ ...prev, updated_at: new Date().toISOString() }));
+      setSalvataggioManuale("saved");
+      setTimeout(() => setSalvataggioManuale("idle"), 2000);
+    } catch (e) {
+      setSalvataggioManuale("error");
+    }
+  };
+
+  const importaFile = async (file) => {
+    if (!commessaId) {
+      setImportErrore("Seleziona prima una commessa.");
+      setImportStato("error");
+      return;
+    }
+    setImportStato("loading");
+    setImportErrore("");
+    setImportRiepilogo(null);
+    try {
+      const { valori: nuoviValori, trovate, nonTrovate } = await estraiValoriBudgetDaFile(file);
+      const valoriUniti = { ...valori, ...nuoviValori };
+      setValori(valoriUniti);
+      const { error } = await supabase.from("budget_hp_inv").upsert({
+        commessa_id: commessaId,
+        mq_vendita: mqVendita || null,
+        valori: valoriUniti,
+        nome_file_origine: file.name,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "commessa_id" });
+      if (error) throw error;
+      setUltimoAggiornamento({ updated_at: new Date().toISOString(), nome_file_origine: file.name });
+      setImportRiepilogo({ trovate: trovate.length, nonTrovate: nonTrovate.length });
+      setImportStato("done");
+    } catch (e) {
+      setImportErrore(e.message || "Errore durante la lettura del file.");
+      setImportStato("error");
+    }
+  };
+
+  const handleImportFile = (e) => {
+    const file = e.target.files?.[0];
+    if (file) importaFile(file);
+    e.target.value = "";
+  };
+
   return (
     <div>
+      {/* selettore commessa */}
+      <div style={{ marginBottom:20 }}>
+        <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Commessa</label>
+        <select
+          value={commessaId}
+          onChange={e => selezionaCommessaLocale(e.target.value)}
+          style={{ background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.9rem", cursor:"pointer" }}
+        >
+          <option value="">Seleziona una commessa…</option>
+          {commesse.map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}
+        </select>
+        {caricamentoCommesse && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:4 }}>Caricamento elenco commesse…</div>}
+        {!commessaId && !caricamentoCommesse && <div style={{ color:"#64748b", fontSize:"0.78rem", marginTop:6 }}>Seleziona una commessa per vedere o modificare il suo Budget HP INV.</div>}
+        {caricamentoBudget && <div style={{ color:"#7dd3fc", fontSize:"0.78rem", marginTop:6 }}>⏳ Caricamento ultima versione del budget…</div>}
+        {erroreCaricamento && <div style={{ color:"#fca5a5", fontSize:"0.78rem", marginTop:6 }}>{erroreCaricamento}</div>}
+        {commessaId && !caricamentoBudget && ultimoAggiornamento && (
+          <div style={{ color:"#86efac", fontSize:"0.75rem", marginTop:6 }}>
+            ✓ Versione del {new Date(ultimoAggiornamento.updated_at).toLocaleString("it-IT")}{ultimoAggiornamento.nome_file_origine ? ` — da "${ultimoAggiornamento.nome_file_origine}"` : ""}
+          </div>
+        )}
+        {commessaId && !caricamentoBudget && !ultimoAggiornamento && (
+          <div style={{ color:"#64748b", fontSize:"0.75rem", marginTop:6 }}>Nessuna ipotesi di investimento ancora caricata per questa commessa.</div>
+        )}
+      </div>
+
+      {commessaId && (
+      <>
+      {/* import da file */}
+      <div style={{ background:"#1e293b", border:"1px solid #334155", borderRadius:12, padding:16, marginBottom:20 }}>
+        <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.82rem", marginBottom:8 }}>📥 IMPORTA DA FILE IPOTESI DI INVESTIMENTO</div>
+        <label style={{ display:"inline-block", background:"#1d4ed8", color:"#fff", border:"none", borderRadius:8, padding:"8px 16px", cursor:"pointer", fontWeight:700, fontSize:"0.82rem" }}>
+          {importStato==="loading" ? "Lettura file…" : "Scegli file .xls/.xlsx"}
+          <input type="file" accept=".xls,.xlsx" onChange={handleImportFile} style={{ display:"none" }} disabled={importStato==="loading"} />
+        </label>
+        {importStato==="done" && importRiepilogo && (
+          <div style={{ color:"#86efac", fontSize:"0.8rem", marginTop:8 }}>
+            ✓ Importate {importRiepilogo.trovate} voci su {BUDGET_VOCI.length}{importRiepilogo.nonTrovate>0 ? ` (${importRiepilogo.nonTrovate} non trovate nel file, lasciate invariate)` : ""}. Salvato automaticamente.
+          </div>
+        )}
+        {importStato==="error" && <div style={{ color:"#fca5a5", fontSize:"0.8rem", marginTop:8 }}>{importErrore}</div>}
+        {importStato==="idle" && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:6 }}>Legge automaticamente i valori Standard ed Extra capitolato per ciascuna voce dal file Excel dell'ipotesi di investimento. Puoi anche caricarlo direttamente dal tab Documenti: verrà collegato qui in automatico.</div>}
+      </div>
+
       {/* header dati */}
       <div style={{ display:"flex", gap:12, marginBottom:20, flexWrap:"wrap" }}>
         <div style={{ background:"#1e293b", border:"1px solid #334155", borderRadius:10, padding:"12px 18px", flex:1, minWidth:160 }}>
@@ -547,6 +795,7 @@ function TabBudget() {
           {mqVendita>0 && <div style={{ color:"#94a3b8", fontSize:"0.75rem" }}>{fmtEur(Math.round(totale/mqVendita))}/mq</div>}
         </div>
       </div>
+
 
       {/* tabella */}
       <div style={{ overflowX:"auto" }}>
@@ -606,13 +855,24 @@ function TabBudget() {
           </tbody>
         </table>
       </div>
+
+      <div style={{ marginTop:20, display:"flex", alignItems:"center", gap:12 }}>
+        <button onClick={salvaSuSupabase} disabled={salvataggioManuale==="saving"}
+          style={{ background:"#1d4ed8", color:"#fff", border:"none", borderRadius:8, padding:"9px 18px", cursor:"pointer", fontWeight:700, fontSize:"0.84rem", opacity: salvataggioManuale==="saving"?0.6:1 }}>
+          {salvataggioManuale==="saving" ? "Salvataggio…" : "💾 Salva modifiche"}
+        </button>
+        {salvataggioManuale==="saved" && <span style={{ color:"#86efac", fontSize:"0.82rem" }}>✓ Salvato</span>}
+        {salvataggioManuale==="error" && <span style={{ color:"#fca5a5", fontSize:"0.82rem" }}>Errore durante il salvataggio</span>}
+      </div>
+      </>
+      )}
     </div>
   );
 }
 
 const FORM_VUOTO = { id:null, nome:"", brand:"OVS", responsabile:"", tecnico:"", periodo:"", indirizzo:"", citta:"", mq:0, note:"", drive_folder_id:null };
 
-function TabScheda() {
+function TabScheda({ commessaIdGlobale, onCambiaCommessa }) {
   const [commesse, setCommesse] = useState([]);
   const [caricamentoLista, setCaricamentoLista] = useState(true);
   const [form, setForm] = useState(FORM_VUOTO);
@@ -634,10 +894,23 @@ function TabScheda() {
   useEffect(() => { caricaCommesse(); }, []);
 
   const selezionaCommessa = (id) => {
-    if (!id) { setForm(FORM_VUOTO); return; }
+    if (!id) { setForm(FORM_VUOTO); onCambiaCommessa?.(null); return; }
     const c = commesse.find(x => x.id === id);
     if (c) setForm({ ...FORM_VUOTO, ...c });
+    onCambiaCommessa?.(id || null);
   };
+
+  // Se la commessa selezionata globalmente cambia da un altro tab (es. da
+  // Documenti), aggiorna anche il form della Scheda Negozio di conseguenza.
+  useEffect(() => {
+    if (commessaIdGlobale && commessaIdGlobale !== form.id && commesse.length > 0) {
+      const c = commesse.find(x => x.id === commessaIdGlobale);
+      if (c) setForm({ ...FORM_VUOTO, ...c });
+    }
+    if (!commessaIdGlobale && form.id) {
+      setForm(FORM_VUOTO);
+    }
+  }, [commessaIdGlobale, commesse]);
 
   const salva = async () => {
     if (!form.nome.trim()) { setErroreSalvataggio("Il nome del negozio è obbligatorio."); setSalvataggio("error"); return; }
@@ -658,6 +931,7 @@ function TabScheda() {
         const { data, error } = await supabase.from("commesse").insert(payload).select().single();
         if (error) throw error;
         setForm(f => ({ ...f, id: data.id }));
+        onCambiaCommessa?.(data.id);
       }
       setSalvataggio("saved");
       await caricaCommesse();
@@ -709,7 +983,52 @@ function TabScheda() {
         { label:"Brand", key:"brand", type:"select", opts:["OVS","UPIM"] },
         { label:"Responsabile commessa", key:"responsabile" },
         { label:"Tecnico", key:"tecnico" },
-        { label:"Periodo (es. 1° 2025)", key:"periodo" },
+      ].map(f=>(
+        <div key={f.key} style={{ marginBottom:14 }}>
+          <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>{f.label}</label>
+          {f.type==="select"
+            ? <select value={form[f.key]} onChange={e=>set(f.key,e.target.value)} style={{ ...inpStyle, cursor:"pointer" }}>
+                {f.opts.map(o=><option key={o}>{o}</option>)}
+              </select>
+            : <input type={f.type||"text"} value={form[f.key]} onChange={e=>set(f.key,e.target.value)} style={inpStyle} />
+          }
+        </div>
+      ))}
+
+      {/* periodo cantiere: mese + anno, usato come soglia per distinguere
+          documentazione storica da pratiche nuove del cantiere attuale */}
+      <div style={{ marginBottom:14 }}>
+        <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Periodo cantiere (mese di inizio)</label>
+        <div style={{ display:"flex", gap:8 }}>
+          <select
+            value={form.periodo ? form.periodo.split("-")[1] : ""}
+            onChange={e => {
+              const anno = form.periodo ? form.periodo.split("-")[0] : String(new Date().getFullYear());
+              set("periodo", e.target.value ? `${anno}-${e.target.value}` : "");
+            }}
+            style={{ ...inpStyle, cursor:"pointer", flex:2 }}
+          >
+            <option value="">Mese…</option>
+            {["01","02","03","04","05","06","07","08","09","10","11","12"].map((m,idx) => (
+              <option key={m} value={m}>{["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"][idx]}</option>
+            ))}
+          </select>
+          <select
+            value={form.periodo ? form.periodo.split("-")[0] : ""}
+            onChange={e => {
+              const mese = form.periodo ? form.periodo.split("-")[1] : "01";
+              set("periodo", e.target.value ? `${e.target.value}-${mese}` : "");
+            }}
+            style={{ ...inpStyle, cursor:"pointer", flex:1 }}
+          >
+            <option value="">Anno…</option>
+            {Array.from({length:8}, (_,i) => String(new Date().getFullYear() - 2 + i)).map(a => <option key={a} value={a}>{a}</option>)}
+          </select>
+        </div>
+        <div style={{ color:"#475569", fontSize:"0.72rem", marginTop:4 }}>Usato per distinguere automaticamente la documentazione storica da quella nuova quando carichi pratiche edilizie nel tab Documenti.</div>
+      </div>
+
+      {[
         { label:"Indirizzo", key:"indirizzo" },
         { label:"Città", key:"citta" },
         { label:"MQ vendita lordi", key:"mq", type:"number" },
@@ -764,7 +1083,7 @@ function TabScheda() {
       {form.nome && (
         <div style={{ background:"#0f172a", border:"1px solid #1e3a5f", borderRadius:12, padding:18, marginTop:8 }}>
           <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"1rem", marginBottom:10 }}>📋 Scheda negozio</div>
-          {[["Brand", form.brand],["Commessa",form.nome],["Responsabile",form.responsabile],["Tecnico",form.tecnico],["Periodo",form.periodo],["Indirizzo",`${form.indirizzo}${form.citta?" – "+form.citta:""}`],["MQ vendita",form.mq?form.mq+" mq":""]].filter(([,v])=>v).map(([k,v])=>(
+          {[["Brand", form.brand],["Commessa",form.nome],["Responsabile",form.responsabile],["Tecnico",form.tecnico],["Periodo",formattaPeriodo(form.periodo)],["Indirizzo",`${form.indirizzo}${form.citta?" – "+form.citta:""}`],["MQ vendita",form.mq?form.mq+" mq":""]].filter(([,v])=>v).map(([k,v])=>(
             <div key={k} style={{ display:"flex", gap:8, marginBottom:5 }}>
               <span style={{ color:"#475569", width:120, fontSize:"0.82rem", flexShrink:0 }}>{k}</span>
               <span style={{ color:"#e2e8f0", fontSize:"0.82rem" }}>{v}</span>
@@ -1378,7 +1697,7 @@ function TabEditorPDF() {
 // Struttura archivio: ogni voce è un percorso completo di cartella + descrizione
 // usata dall'AI per decidere dove va classificato un documento.
 const STRUTTURA_ARCHIVIO = [
-  { path:"DOC INIZIALE/DOC FONDAMENTALI",                 desc:"Documenti della checklist Pratiche Amministrative già previsti dall'app (CPI, DIA VVF, agibilità, catastali, contratti energia, ecc.)" },
+  { path:"DOC INIZIALE/DOC FONDAMENTALI",                 desc:"Documenti della checklist Pratiche Amministrative già previsti dall'app (CPI, DIA VVF, agibilità, catastali, contratti energia, ecc.). Include anche pratiche edilizie STORICHE: se il documento è una pratica edilizia (CILA, SCIA, permesso di costruire, agibilità, certificati, ecc.) la cui data è ANTERIORE al periodo cantiere indicato, va qui come documentazione pregressa dell'immobile, non in PRATICHE EDILIZIE." },
   { path:"DOC INIZIALE/DOC ACCESSORI",                    desc:"Documenti non in checklist, ricevuti da corrispondenze varie, non fondamentali ma utili" },
   { path:"DOC INIZIALE/IMMOBILIARE/CORRISPONDENZA IMMOBILIARE", desc:"Mail e comunicazioni con l'ufficio immobiliare" },
   { path:"DOC INIZIALE/IMMOBILIARE/CONTRATTO",            desc:"Bozze di contratto e contratto di locazione definitivo" },
@@ -1387,10 +1706,12 @@ const STRUTTURA_ARCHIVIO = [
   { path:"PROGETTI IMPIANTI/ELETTRICO",                   desc:"SOLO elaborati tecnici di progetto dell'impianto elettrico, come tavole, relazioni tecniche o schemi. NON includere computi metrici, preventivi o documenti con importi economici: quelli vanno sempre in COMPUTI anche se riguardano l'impianto elettrico." },
   { path:"PROGETTI IMPIANTI/VVF",                         desc:"SOLO elaborati tecnici di progetto antincendio (sprinkler, rilevazione fumi, idranti). NON includere computi metrici o preventivi con importi: quelli vanno in COMPUTI." },
   { path:"PROGETTI ST",                                   desc:"Eventuali progetti elaborati direttamente dai Servizi Tecnici (solo elaborati di progetto, non economici)" },
-  { path:"COMPUTI",                                       desc:"QUALSIASI computo metrico estimativo (CME), preventivo di fornitore o documento con importi economici legati a lavori o impianti — meccanico, elettrico, VVF, edile o altro. Riconoscibile da: presenza di voci di costo, importi in euro, totali, elenco prezzi. Questo vale anche se il file riguarda uno specifico impianto: un computo dell'impianto meccanico va qui, non in PROGETTI IMPIANTI." },
+  { path:"COMPUTI",                                       desc:"Computi metrici estimativi (CME) e preventivi di fornitore con importi economici legati a lavori o impianti — meccanico, elettrico, VVF, edile o altro. Riconoscibile da: presenza di voci di costo, importi in euro, totali, elenco prezzi, riferiti a UN singolo fornitore/impianto/lavorazione specifica. Questo vale anche se il file riguarda uno specifico impianto: un computo dell'impianto meccanico va qui, non in PROGETTI IMPIANTI. NON includere qui le ipotesi di investimento complessive (HP INV): quelle vanno in HP INVESTIMENTO." },
+  { path:"HP INVESTIMENTO",                               desc:"Ipotesi di investimento complessiva del punto vendita (spesso nominata 'HP INV' nel file o nel nome del documento, con foglio Excel intitolato 'HP INV'). Riconoscibile da: elenco di voci numerate (es. 1, 2, 3, 5a, 13a...) che coprono l'intero progetto (arredo, impianti, opere edili, consulenze, ecc.) con colonne separate 'Standard' ed 'Extra capitolato' e un totale per voce — è un riepilogo budget complessivo dell'intera commessa, non il preventivo di un singolo fornitore. Diverso da COMPUTI, che riguarda un singolo computo/preventivo di una specifica lavorazione." },
+  { path:"CRONOPROGRAMMA",                                desc:"Cronoprogramma di cantiere: diagramma di Gantt o tabella con le fasi/attività di lavoro pianificate nel tempo, con date di inizio e fine per ciascuna fase. Riconoscibile da: elenco di lavorazioni/fasi con barre temporali o colonne data inizio/data fine, organizzato per settimane o giorni di cantiere." },
   { path:"CONTABILITA'",                                  desc:"Consuntivi economici, fatture, Stati Avanzamento Lavori (SAL) già fatturati o liquidati, divisi per fornitore — diverso da COMPUTI che riguarda preventivi/computi non ancora a consuntivo" },
-  { path:"PRATICHE EDILIZIE/INIZIO LAVORI",               desc:"Pratiche edilizie di inizio cantiere predisposte dal Direttore Lavori (PSC, notifica preliminare, CILA/SCIA)" },
-  { path:"PRATICHE EDILIZIE/FINE LAVORI",                 desc:"Pratiche edilizie di fine cantiere predisposte dal DL (fine lavori, collaudi, dichiarazioni)" },
+  { path:"PRATICHE EDILIZIE/INIZIO LAVORI",               desc:"Pratiche edilizie di inizio cantiere predisposte dal Direttore Lavori per QUESTO cantiere (PSC, notifica preliminare, CILA/SCIA): la data del documento deve essere SUCCESSIVA o pari al periodo cantiere indicato. Se la data è anteriore al periodo cantiere, è documentazione storica e va in DOC INIZIALE/DOC FONDAMENTALI, non qui." },
+  { path:"PRATICHE EDILIZIE/FINE LAVORI",                 desc:"Pratiche edilizie di fine cantiere predisposte dal DL per QUESTO cantiere (fine lavori, collaudi, dichiarazioni): la data del documento deve essere successiva al periodo cantiere indicato." },
   { path:"PRATICHE INSEGNE",                              desc:"Pratiche e autorizzazioni per insegne e pubblicità esterna, ricevute dal DL" },
   { path:"SOPRALLUOGHI/REPORT",                           desc:"Report generati dall'AI partendo da foto e registrazioni di riunioni di cantiere" },
   { path:"FOTO/FOTO INIZIALI",                            desc:"Foto del sopralluogo iniziale, locali allo stato di fatto" },
@@ -1405,13 +1726,13 @@ const ARCHIVIO_STATUS_STYLE = {
   error:     { bg:"#450a0a", color:"#fca5a5", label:"Errore" },
 };
 
-function TabDocumenti() {
+function TabDocumenti({ commessaIdGlobale, onCambiaCommessa }) {
   const [apiKey, setApiKey] = useState(() => getStoredApiKey());
   const [apiKeySaved, setApiKeySaved] = useState(() => !!getStoredApiKey());
   const [items, setItems] = useState([]); // { id, file, status, cartella, motivazione, riassunto, datiChiave, azioni, errore, driveStato, mappaCartelle }
   const [selectedId, setSelectedId] = useState(null);
   const [commesse, setCommesse] = useState([]);
-  const [commessaId, setCommessaId] = useState("");
+  const [commessaId, setCommessaId] = useState(commessaIdGlobale || "");
   const [caricamentoCommesse, setCaricamentoCommesse] = useState(true);
 
   const inpStyle = { background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.88rem" };
@@ -1423,6 +1744,20 @@ function TabDocumenti() {
       setCaricamentoCommesse(false);
     })();
   }, []);
+
+  // Mantiene sincronizzata la selezione con lo stato globale, in entrambe le
+  // direzioni: se l'utente cambia commessa qui, lo segnala in alto; se la
+  // commessa globale cambia da un altro tab, si aggiorna anche qui.
+  useEffect(() => {
+    if (commessaIdGlobale !== undefined && commessaIdGlobale !== commessaId) {
+      setCommessaId(commessaIdGlobale || "");
+    }
+  }, [commessaIdGlobale]);
+
+  const selezionaCommessaLocale = (id) => {
+    setCommessaId(id);
+    onCambiaCommessa?.(id || null);
+  };
 
   const commessaSelezionata = commesse.find(c => c.id === commessaId);
 
@@ -1446,16 +1781,8 @@ function TabDocumenti() {
   };
 
   // Gemini non accetta file Excel/CSV come allegato binario: li leggiamo
-  // noi nel browser con SheetJS e ne mandiamo il contenuto come testo.
-  const loadSheetJS = () => new Promise((resolve, reject) => {
-    if (window.XLSX) { resolve(window.XLSX); return; }
-    const script = document.createElement("script");
-    script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
-    script.onload = () => resolve(window.XLSX);
-    script.onerror = () => reject(new Error("Impossibile caricare il lettore Excel"));
-    document.head.appendChild(script);
-  });
-
+  // noi nel browser con SheetJS (loadSheetJS, definita a livello di modulo)
+  // e ne mandiamo il contenuto come testo.
   const estraiTestoSpreadsheet = async (file) => {
     const XLSX = await loadSheetJS();
     const buffer = await file.arrayBuffer();
@@ -1487,6 +1814,29 @@ function TabDocumenti() {
     nuovi.forEach(item => classifica(item));
   };
 
+  // Quando un'ipotesi di investimento (HP INV) viene classificata, estrae i
+  // valori dal file con la stessa logica del tab Budget e li salva su Supabase,
+  // sovrascrivendo sempre la versione precedente per quella commessa (upsert
+  // su commessa_id, grazie al vincolo unique della tabella budget_hp_inv).
+  // Così il tab Budget HP INV mostra sempre l'ultima ipotesi caricata.
+  const salvaBudgetSuSupabase = async (item) => {
+    if (!commessaSelezionata) return;
+    setItems(prev => prev.map(i => i.id === item.id ? { ...i, budgetStato: "estrazione" } : i));
+    try {
+      const { valori, trovate, nonTrovate } = await estraiValoriBudgetDaFile(item.file);
+      const { error } = await supabase.from("budget_hp_inv").upsert({
+        commessa_id: commessaSelezionata.id,
+        valori,
+        nome_file_origine: item.file.name,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "commessa_id" });
+      if (error) throw error;
+      setItems(prev => prev.map(i => i.id === item.id ? { ...i, budgetStato: "salvato", budgetRiepilogo: { trovate: trovate.length, nonTrovate: nonTrovate.length } } : i));
+    } catch (e) {
+      setItems(prev => prev.map(i => i.id === item.id ? { ...i, budgetStato: "errore", budgetErrore: e.message } : i));
+    }
+  };
+
   const classifica = async (item) => {
     if (!apiKey) {
       setItems(prev => prev.map(i => i.id === item.id ? { ...i, status:"error", errore:"Inserisci prima la API Key Gemini." } : i));
@@ -1496,10 +1846,14 @@ function TabDocumenti() {
 
     try {
       const elencoCartelle = STRUTTURA_ARCHIVIO.map((c, idx) => `${idx + 1}. "${c.path}" — ${c.desc}`).join("\n");
+      const periodoLeggibile = commessaSelezionata?.periodo ? formattaPeriodo(commessaSelezionata.periodo) : null;
+      const contestoPeriodo = periodoLeggibile
+        ? `\n\nIl periodo cantiere di questa commessa inizia in: ${periodoLeggibile}. Usa questa informazione SOLO per le pratiche edilizie: se trovi una data nel documento (es. data del protocollo, data del titolo abilitativo) ANTERIORE a questo periodo, è documentazione storica/pregressa e va in DOC INIZIALE/DOC FONDAMENTALI; se la data è pari o successiva, è una pratica nuova relativa a questo cantiere e va in PRATICHE EDILIZIE/INIZIO LAVORI o FINE LAVORI secondo il contenuto.`
+        : `\n\nNota: non è stato indicato un periodo cantiere per questa commessa, quindi per le pratiche edilizie usa il buon senso guardando il contesto generale del documento (se sembra riferirsi a una fase storica/pregressa o a lavori in corso).`;
       const promptText = `Sei un archivista esperto di pratiche edilizie e gestione commesse retail. Apri e analizza il documento allegato (file: "${item.file.name}"). Determina autonomamente di che tipo di documento si tratta guardando il contenuto, non solo il nome del file.
 
 Devi scegliere UNA SOLA cartella di destinazione tra questo elenco esatto (rispondi usando esattamente uno di questi percorsi, copiato identico):
-${elencoCartelle}
+${elencoCartelle}${contestoPeriodo}
 
 Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backtick, con questa struttura esatta:
 {
@@ -1549,6 +1903,12 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
       if (commessaSelezionata?.drive_folder_id) {
         caricaSuDrive({ ...item, cartella: cartellaValida });
       }
+
+      // Se il documento è un'ipotesi di investimento, estrae i valori e li
+      // salva automaticamente nel Budget HP INV della commessa selezionata.
+      if (cartellaValida === "HP INVESTIMENTO" && commessaSelezionata) {
+        salvaBudgetSuSupabase({ ...item, cartella: cartellaValida });
+      }
     } catch (e) {
       setItems(prev => prev.map(i => i.id === item.id ? { ...i, status:"error", errore: e.message } : i));
     }
@@ -1596,7 +1956,7 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
       {/* selettore commessa */}
       <div style={{ marginBottom:20 }}>
         <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>Commessa di destinazione</label>
-        <select value={commessaId} onChange={e => setCommessaId(e.target.value)} style={{ ...inpStyle, cursor:"pointer" }}>
+        <select value={commessaId} onChange={e => selezionaCommessaLocale(e.target.value)} style={{ ...inpStyle, cursor:"pointer" }}>
           <option value="">Seleziona una commessa…</option>
           {commesse.map(c => <option key={c.id} value={c.id}>{c.nome}{!c.drive_folder_id ? " (cartella Drive non creata)" : ""}</option>)}
         </select>
@@ -1692,6 +2052,29 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
                 {selected.driveStato === "error" && <div style={{ color:"#fca5a5", fontSize:"0.75rem", marginTop:6 }}>{selected.driveErrore}</div>}
               </div>
             )}
+
+            {selected.cartella === "HP INVESTIMENTO" && (
+              <div style={{ marginTop:14 }}>
+                {selected.budgetStato === "estrazione" && (
+                  <div style={{ background:"#1e3a5f", border:"1px solid #3b82f633", borderRadius:8, padding:"10px 14px", color:"#7dd3fc", fontSize:"0.82rem" }}>
+                    ⏳ Estrazione valori e aggiornamento Budget HP INV in corso…
+                  </div>
+                )}
+                {selected.budgetStato === "salvato" && (
+                  <div style={{ background:"#14532d22", border:"1px solid #22c55e33", borderRadius:8, padding:"10px 14px", color:"#86efac", fontSize:"0.82rem" }}>
+                    ✓ Budget HP INV aggiornato: {selected.budgetRiepilogo?.trovate} voci importate{selected.budgetRiepilogo?.nonTrovate > 0 ? ` (${selected.budgetRiepilogo.nonTrovate} non trovate nel file)` : ""}. Visibile nel tab Budget HP INV per questa commessa.
+                  </div>
+                )}
+                {selected.budgetStato === "errore" && (
+                  <div style={{ background:"#450a0a22", border:"1px solid #ef444433", borderRadius:8, padding:"10px 14px", color:"#fca5a5", fontSize:"0.82rem" }}>
+                    ⚠️ Non è stato possibile aggiornare il Budget HP INV: {selected.budgetErrore}
+                  </div>
+                )}
+                {!commessaSelezionata && (
+                  <div style={{ color:"#64748b", fontSize:"0.72rem" }}>Seleziona una commessa per aggiornare automaticamente il Budget HP INV.</div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1717,6 +2100,9 @@ export default function App() {
   const [tab, setTab] = useState("workflow");
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  // Commessa selezionata, condivisa tra Scheda Negozio, Documenti e Budget HP INV,
+  // così cambiando tab non si perde la selezione e i dati restano coerenti.
+  const [commessaIdGlobale, setCommessaIdGlobale] = useState(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -1776,13 +2162,13 @@ export default function App() {
 
       {/* content */}
       <div style={{ maxWidth:1100, margin:"0 auto", padding:"28px 24px" }}>
-        {tab==="scheda"   && <TabScheda />}
+        {tab==="scheda"   && <TabScheda commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} />}
         {tab==="workflow" && <TabWorkflow />}
         {tab==="pratiche" && <TabPratiche />}
-        {tab==="budget"   && <TabBudget />}
+        {tab==="budget"   && <TabBudget commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} />}
         {tab==="ai"       && <TabAnalisiAI />}
         {tab==="pdf"      && <TabEditorPDF />}
-        {tab==="documenti"&& <TabDocumenti />}
+        {tab==="documenti"&& <TabDocumenti commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} />}
       </div>
     </div>
   );
