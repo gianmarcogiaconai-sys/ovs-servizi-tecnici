@@ -2847,7 +2847,257 @@ function TabVocale({ commessaIdGlobale, commesse, commessaSelezionata }) {
   );
 }
 
-const TABS = [
+// ── AREA GESTIONE QUOTIDIANA — Progetti tematici e loro attività ────────────────
+const STATI_ATTIVITA = ["DA FARE", "IN CORSO", "FATTO"];
+const STATO_STYLE_ATT = {
+  "DA FARE": { bg:"#450a0a", color:"#fca5a5" },
+  "IN CORSO": { bg:"#422006", color:"#fcd34d" },
+  "FATTO": { bg:"#14532d", color:"#86efac" },
+};
+const COLORI_PROGETTO = ["#3b82f6","#06b6d4","#8b5cf6","#ec4899","#f59e0b","#10b981","#ef4444","#14b8a6"];
+
+function TabProgetti() {
+  const [progetti, setProgetti] = useState([]);
+  const [attivita, setAttivita] = useState([]); // tutte le attività di tutti i progetti
+  const [caricamento, setCaricamento] = useState(true);
+  const [errore, setErrore] = useState("");
+  const [progettoSelezionato, setProgettoSelezionato] = useState(null); // id
+  const [nuovoProgettoNome, setNuovoProgettoNome] = useState("");
+  const [mostraNuovoProgetto, setMostraNuovoProgetto] = useState(false);
+  const [confermaEliminaProgetto, setConfermaEliminaProgetto] = useState(null); // id progetto in conferma
+
+  // form nuova attività
+  const [nuovaAtt, setNuovaAtt] = useState({ descrizione:"", scadenza:"", preavviso_giorni:"", note:"" });
+  const [salvandoAtt, setSalvandoAtt] = useState(false);
+
+  const inp = { background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", outline:"none", fontSize:"0.88rem", width:"100%" };
+
+  const carica = async () => {
+    setCaricamento(true);
+    setErrore("");
+    try {
+      const [pRes, aRes] = await Promise.all([
+        supabase.from("progetti").select("*").order("created_at", { ascending:true }),
+        supabase.from("progetto_attivita").select("*").order("created_at", { ascending:true }),
+      ]);
+      if (pRes.error) throw pRes.error;
+      if (aRes.error) throw aRes.error;
+      setProgetti(pRes.data || []);
+      setAttivita(aRes.data || []);
+      // se non c'è un progetto selezionato, seleziona il primo
+      if (!progettoSelezionato && pRes.data && pRes.data.length > 0) {
+        setProgettoSelezionato(pRes.data[0].id);
+      }
+    } catch (e) {
+      setErrore(e.message || "Errore durante il caricamento.");
+    } finally {
+      setCaricamento(false);
+    }
+  };
+
+  useEffect(() => { carica(); }, []);
+
+  const creaProgetto = async () => {
+    if (!nuovoProgettoNome.trim()) return;
+    const colore = COLORI_PROGETTO[progetti.length % COLORI_PROGETTO.length];
+    try {
+      const { data, error } = await supabase.from("progetti").insert({ nome: nuovoProgettoNome.trim(), colore }).select().single();
+      if (error) throw error;
+      setProgetti(prev => [...prev, data]);
+      setProgettoSelezionato(data.id);
+      setNuovoProgettoNome("");
+      setMostraNuovoProgetto(false);
+    } catch (e) {
+      setErrore(e.message || "Errore durante la creazione del progetto.");
+    }
+  };
+
+  const eliminaProgetto = async (id) => {
+    try {
+      const { error } = await supabase.from("progetti").delete().eq("id", id);
+      if (error) throw error;
+      setProgetti(prev => prev.filter(p => p.id !== id));
+      setAttivita(prev => prev.filter(a => a.progetto_id !== id));
+      setConfermaEliminaProgetto(null);
+      if (progettoSelezionato === id) {
+        const rimasti = progetti.filter(p => p.id !== id);
+        setProgettoSelezionato(rimasti.length > 0 ? rimasti[0].id : null);
+      }
+    } catch (e) {
+      setErrore(e.message || "Errore durante l'eliminazione del progetto.");
+    }
+  };
+
+  const aggiungiAttivita = async () => {
+    if (!nuovaAtt.descrizione.trim() || !progettoSelezionato) return;
+    setSalvandoAtt(true);
+    try {
+      const payload = {
+        progetto_id: progettoSelezionato,
+        descrizione: nuovaAtt.descrizione.trim(),
+        stato: "DA FARE",
+        scadenza: nuovaAtt.scadenza || null,
+        preavviso_giorni: nuovaAtt.preavviso_giorni ? Number(nuovaAtt.preavviso_giorni) : null,
+        note: nuovaAtt.note || null,
+      };
+      const { data, error } = await supabase.from("progetto_attivita").insert(payload).select().single();
+      if (error) throw error;
+      setAttivita(prev => [...prev, data]);
+      setNuovaAtt({ descrizione:"", scadenza:"", preavviso_giorni:"", note:"" });
+    } catch (e) {
+      setErrore(e.message || "Errore durante l'aggiunta dell'attività.");
+    } finally {
+      setSalvandoAtt(false);
+    }
+  };
+
+  const cambiaStatoAttivita = async (att) => {
+    const idx = STATI_ATTIVITA.indexOf(att.stato);
+    const nuovoStato = STATI_ATTIVITA[(idx + 1) % STATI_ATTIVITA.length];
+    setAttivita(prev => prev.map(a => a.id === att.id ? { ...a, stato: nuovoStato } : a));
+    try {
+      await supabase.from("progetto_attivita").update({ stato: nuovoStato, updated_at: new Date().toISOString() }).eq("id", att.id);
+    } catch (e) {
+      setErrore(e.message || "Errore durante l'aggiornamento.");
+      carica();
+    }
+  };
+
+  const eliminaAttivita = async (id) => {
+    setAttivita(prev => prev.filter(a => a.id !== id));
+    try {
+      await supabase.from("progetto_attivita").delete().eq("id", id);
+    } catch (e) {
+      setErrore(e.message || "Errore durante l'eliminazione.");
+      carica();
+    }
+  };
+
+  const progettoCorrente = progetti.find(p => p.id === progettoSelezionato);
+  const attivitaProgetto = attivita.filter(a => a.progetto_id === progettoSelezionato);
+  const contaAttivita = (pid) => attivita.filter(a => a.progetto_id === pid).length;
+  const contaDaFare = (pid) => attivita.filter(a => a.progetto_id === pid && a.stato !== "FATTO").length;
+
+  if (caricamento) return <div style={{ color:"#7dd3fc", fontSize:"0.9rem" }}>Caricamento progetti…</div>;
+
+  return (
+    <div>
+      <div style={{ marginBottom:8, color:"#94a3b8", fontSize:"0.9rem" }}>
+        Organizza le attività di gestione quotidiana per progetto/tema (Cloud, Telefonia, Sicurezza, Chiusure PV, Spagna, UPIM…).
+      </div>
+      {errore && <div style={{ color:"#fca5a5", fontSize:"0.82rem", marginBottom:12, background:"#450a0a22", border:"1px solid #ef444433", borderRadius:8, padding:"8px 12px" }}>{errore}</div>}
+
+      <div style={{ display:"grid", gridTemplateColumns:"260px 1fr", gap:18 }}>
+        {/* colonna progetti */}
+        <div>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+            <span style={{ color:"#7dd3fc", fontSize:"0.78rem", fontWeight:700, letterSpacing:"0.06em" }}>PROGETTI</span>
+            <button onClick={() => setMostraNuovoProgetto(v => !v)} style={{ background:"#1d4ed8", color:"#fff", border:"none", borderRadius:6, padding:"3px 10px", cursor:"pointer", fontSize:"0.78rem", fontWeight:700 }}>+ Nuovo</button>
+          </div>
+
+          {mostraNuovoProgetto && (
+            <div style={{ marginBottom:10, background:"#1e293b", border:"1px solid #334155", borderRadius:8, padding:10 }}>
+              <input value={nuovoProgettoNome} onChange={e => setNuovoProgettoNome(e.target.value)} placeholder="Nome progetto (es. Cloud)" style={{ ...inp, marginBottom:8 }} onKeyDown={e => e.key==="Enter" && creaProgetto()} />
+              <div style={{ display:"flex", gap:6 }}>
+                <button onClick={creaProgetto} style={{ background:"#1d4ed8", color:"#fff", border:"none", borderRadius:6, padding:"5px 12px", cursor:"pointer", fontSize:"0.78rem", fontWeight:700 }}>Crea</button>
+                <button onClick={() => { setMostraNuovoProgetto(false); setNuovoProgettoNome(""); }} style={{ background:"#0f172a", color:"#94a3b8", border:"1px solid #334155", borderRadius:6, padding:"5px 12px", cursor:"pointer", fontSize:"0.78rem" }}>Annulla</button>
+              </div>
+            </div>
+          )}
+
+          {progetti.length === 0 && !mostraNuovoProgetto && (
+            <div style={{ color:"#64748b", fontSize:"0.82rem", background:"#1e293b", border:"1px solid #334155", borderRadius:8, padding:"12px 14px" }}>Nessun progetto. Creane uno con "+ Nuovo".</div>
+          )}
+
+          {progetti.map(p => (
+            <div key={p.id}
+              onClick={() => setProgettoSelezionato(p.id)}
+              style={{ display:"flex", alignItems:"center", gap:10, background: progettoSelezionato===p.id?"#1e3a5f":"#1e293b", border:`1px solid ${progettoSelezionato===p.id?"#3b82f6":"#334155"}`, borderRadius:8, padding:"10px 12px", marginBottom:6, cursor:"pointer" }}>
+              <div style={{ width:10, height:10, borderRadius:3, background:p.colore, flexShrink:0 }} />
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ color:"#e2e8f0", fontSize:"0.88rem", fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.nome}</div>
+                <div style={{ color:"#64748b", fontSize:"0.72rem" }}>{contaDaFare(p.id)} da fare · {contaAttivita(p.id)} totali</div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* colonna attività del progetto selezionato */}
+        <div>
+          {!progettoCorrente ? (
+            <div style={{ color:"#64748b", fontSize:"0.88rem", background:"#1e293b", border:"1px solid #334155", borderRadius:10, padding:"20px" }}>Seleziona o crea un progetto per gestire le sue attività.</div>
+          ) : (
+            <>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                  <div style={{ width:14, height:14, borderRadius:4, background:progettoCorrente.colore }} />
+                  <span style={{ color:"#f1f5f9", fontSize:"1.05rem", fontWeight:700 }}>{progettoCorrente.nome}</span>
+                </div>
+                {confermaEliminaProgetto === progettoCorrente.id ? (
+                  <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+                    <span style={{ color:"#fca5a5", fontSize:"0.78rem" }}>Eliminare il progetto e tutte le sue attività?</span>
+                    <button onClick={() => eliminaProgetto(progettoCorrente.id)} style={{ background:"#7f1d1d", color:"#fff", border:"none", borderRadius:6, padding:"4px 10px", cursor:"pointer", fontSize:"0.75rem", fontWeight:700 }}>Sì</button>
+                    <button onClick={() => setConfermaEliminaProgetto(null)} style={{ background:"#1e293b", color:"#94a3b8", border:"1px solid #334155", borderRadius:6, padding:"4px 10px", cursor:"pointer", fontSize:"0.75rem" }}>No</button>
+                  </div>
+                ) : (
+                  <button onClick={() => setConfermaEliminaProgetto(progettoCorrente.id)} style={{ background:"none", color:"#fca5a5", border:"1px solid #ef444433", borderRadius:6, padding:"4px 10px", cursor:"pointer", fontSize:"0.75rem", fontWeight:700 }}>🗑 Elimina progetto</button>
+                )}
+              </div>
+
+              {/* form aggiungi attività */}
+              <div style={{ background:"#1e293b", border:"1px solid #334155", borderRadius:10, padding:14, marginBottom:16 }}>
+                <input value={nuovaAtt.descrizione} onChange={e => setNuovaAtt(v => ({ ...v, descrizione:e.target.value }))} placeholder="Nuova attività…" style={{ ...inp, marginBottom:8 }} />
+                <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:8 }}>
+                  <div style={{ flex:1, minWidth:140 }}>
+                    <label style={{ color:"#64748b", fontSize:"0.72rem", display:"block", marginBottom:2 }}>Scadenza (opzionale)</label>
+                    <input type="date" value={nuovaAtt.scadenza} onChange={e => setNuovaAtt(v => ({ ...v, scadenza:e.target.value }))} style={inp} />
+                  </div>
+                  <div style={{ flex:1, minWidth:140 }}>
+                    <label style={{ color:"#64748b", fontSize:"0.72rem", display:"block", marginBottom:2 }}>Preavviso (giorni prima)</label>
+                    <input type="number" value={nuovaAtt.preavviso_giorni} onChange={e => setNuovaAtt(v => ({ ...v, preavviso_giorni:e.target.value }))} placeholder="es. 90" style={inp} />
+                  </div>
+                </div>
+                <input value={nuovaAtt.note} onChange={e => setNuovaAtt(v => ({ ...v, note:e.target.value }))} placeholder="Note (opzionale)" style={{ ...inp, marginBottom:8 }} />
+                <button onClick={aggiungiAttivita} disabled={salvandoAtt || !nuovaAtt.descrizione.trim()} style={{ background:"#1d4ed8", color:"#fff", border:"none", borderRadius:8, padding:"7px 16px", cursor: nuovaAtt.descrizione.trim()?"pointer":"not-allowed", fontSize:"0.82rem", fontWeight:700, opacity: nuovaAtt.descrizione.trim()?1:0.5 }}>
+                  {salvandoAtt ? "Aggiunta…" : "+ Aggiungi attività"}
+                </button>
+              </div>
+
+              {/* lista attività */}
+              {attivitaProgetto.length === 0 ? (
+                <div style={{ color:"#64748b", fontSize:"0.85rem" }}>Nessuna attività in questo progetto.</div>
+              ) : (
+                attivitaProgetto.map(a => {
+                  const ss = STATO_STYLE_ATT[a.stato] || STATO_STYLE_ATT["DA FARE"];
+                  return (
+                    <div key={a.id} style={{ background:"#1e293b", border:"1px solid #334155", borderRadius:10, padding:"12px 14px", marginBottom:7 }}>
+                      <div style={{ display:"flex", alignItems:"flex-start", gap:10 }}>
+                        <div style={{ flex:1, minWidth:0 }}>
+                          <div style={{ color:"#e2e8f0", fontSize:"0.9rem", fontWeight:600, textDecoration: a.stato==="FATTO"?"line-through":"none", marginBottom:4 }}>{a.descrizione}</div>
+                          <div style={{ display:"flex", gap:12, flexWrap:"wrap", fontSize:"0.75rem", color:"#64748b" }}>
+                            {a.scadenza && <span>📅 {new Date(a.scadenza).toLocaleDateString("it-IT")}</span>}
+                            {a.preavviso_giorni && <span>🔔 {a.preavviso_giorni} gg prima</span>}
+                            {a.note && <span>📝 {a.note}</span>}
+                          </div>
+                        </div>
+                        <button onClick={() => cambiaStatoAttivita(a)} style={{ background:ss.bg, color:ss.color, border:"none", borderRadius:8, padding:"4px 12px", cursor:"pointer", fontSize:"0.75rem", fontWeight:700, whiteSpace:"nowrap" }}>
+                          {a.stato}
+                        </button>
+                        <button onClick={() => eliminaAttivita(a.id)} style={{ background:"none", color:"#64748b", border:"none", cursor:"pointer", fontSize:"0.95rem" }}>✕</button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const TABS_APERTURE = [
   { id:"scheda",   label:"📋 Scheda Negozio" },
   { id:"workflow", label:"✅ Workflow" },
   { id:"pratiche", label:"📂 Pratiche Amm." },
@@ -2858,10 +3108,25 @@ const TABS = [
   { id:"documenti",label:"📁 Documenti" },
 ];
 
+const TABS_GESTIONE = [
+  { id:"progetti", label:"🗂 Progetti & Attività" },
+];
+
+// Primo tab di ciascuna area, usato quando si cambia interruttore
+const TAB_DEFAULT = { aperture:"workflow", gestione:"progetti" };
+
 export default function App() {
+  const [area, setArea] = useState("aperture"); // aperture | gestione
   const [tab, setTab] = useState("workflow");
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+
+  // Cambia area (Aperture/Gestione) e porta al primo tab di quell'area
+  const cambiaArea = (nuovaArea) => {
+    setArea(nuovaArea);
+    setTab(TAB_DEFAULT[nuovaArea]);
+  };
+
   // Commessa selezionata, condivisa da tutti i tab tramite il selettore unico
   // nell'header: cambiando tab la selezione resta la stessa.
   const [commessaIdGlobale, setCommessaIdGlobale] = useState(null);
@@ -2934,7 +3199,20 @@ export default function App() {
             </button>
           </div>
 
-          {/* selettore globale brand + commessa: vale per tutti i tab */}
+          {/* interruttore tra le due aree */}
+          <div style={{ display:"flex", gap:6, marginBottom:16 }}>
+            <button onClick={() => cambiaArea("aperture")}
+              style={{ flex:1, background: area==="aperture"?"linear-gradient(135deg,#3b82f6,#06b6d4)":"#0f172a", color: area==="aperture"?"#fff":"#94a3b8", border:`1px solid ${area==="aperture"?"#3b82f6":"#334155"}`, borderRadius:10, padding:"10px 16px", cursor:"pointer", fontSize:"0.88rem", fontWeight:700, transition:"all 0.15s" }}>
+              🏗 Aperture & Ristrutturazioni
+            </button>
+            <button onClick={() => cambiaArea("gestione")}
+              style={{ flex:1, background: area==="gestione"?"linear-gradient(135deg,#3b82f6,#06b6d4)":"#0f172a", color: area==="gestione"?"#fff":"#94a3b8", border:`1px solid ${area==="gestione"?"#3b82f6":"#334155"}`, borderRadius:10, padding:"10px 16px", cursor:"pointer", fontSize:"0.88rem", fontWeight:700, transition:"all 0.15s" }}>
+              📋 Gestione Quotidiana
+            </button>
+          </div>
+
+          {/* selettore globale brand + commessa: solo nell'area Aperture */}
+          {area==="aperture" && (
           <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap" }}>
             <select
               value={filtroBrandGlobale}
@@ -2954,10 +3232,11 @@ export default function App() {
               {commesseFiltrateGlobali.map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}
             </select>
           </div>
-          {caricamentoCommesseGlobali && <div style={{ color:"#475569", fontSize:"0.72rem", marginTop:-10, marginBottom:10 }}>Caricamento commesse…</div>}
+          )}
+          {area==="aperture" && caricamentoCommesseGlobali && <div style={{ color:"#475569", fontSize:"0.72rem", marginTop:-10, marginBottom:10 }}>Caricamento commesse…</div>}
 
           <div style={{ display:"flex", gap:2, overflowX:"auto" }}>
-            {TABS.map(t=>(
+            {(area==="aperture" ? TABS_APERTURE : TABS_GESTIONE).map(t=>(
               <button key={t.id} onClick={()=>setTab(t.id)}
                 style={{ background:tab===t.id?"#1e293b":"transparent", color:tab===t.id?"#e2e8f0":"#64748b", border:"none", borderBottom:tab===t.id?"2px solid #3b82f6":"2px solid transparent", padding:"10px 16px", cursor:"pointer", fontSize:"0.85rem", fontWeight:tab===t.id?600:400, transition:"all 0.15s", borderRadius:"8px 8px 0 0", whiteSpace:"nowrap" }}>
                 {t.label}
@@ -2977,6 +3256,7 @@ export default function App() {
         {tab==="pdf"      && <TabEditorPDF />}
         {tab==="vocale"   && <TabVocale commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="documenti"&& <TabDocumenti commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
+        {tab==="progetti" && <TabProgetti />}
       </div>
     </div>
   );
