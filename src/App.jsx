@@ -1145,11 +1145,16 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
   const [erroreSalvataggio, setErroreSalvataggio] = useState("");
   const [driveStato, setDriveStato] = useState("idle"); // idle | creating | done | error
   const [erroreDrive, setErroreDrive] = useState("");
+  const [confermaElimina, setConfermaElimina] = useState(false); // primo click arma la conferma
+  const [eliminazioneStato, setEliminazioneStato] = useState("idle"); // idle | eliminando | errore
+  const [erroreEliminazione, setErroreEliminazione] = useState("");
 
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
   const inpStyle = { background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.9rem" };
 
   const selezionaCommessa = (id) => {
+    setConfermaElimina(false);
+    setErroreEliminazione("");
     if (!id) { setForm(FORM_VUOTO); onCambiaCommessa?.(null); return; }
     const c = commesse.find(x => x.id === id);
     if (c) setForm({ ...FORM_VUOTO, ...c });
@@ -1214,6 +1219,30 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
     } catch (e) {
       setErroreDrive(e.message || "Errore durante la creazione su Drive.");
       setDriveStato("error");
+    }
+  };
+
+  // Elimina definitivamente la commessa selezionata da Supabase. Le tabelle
+  // collegate (workflow_completato, pratiche_amministrative_doc, budget_hp_inv,
+  // ecc.) hanno foreign key con "on delete cascade", quindi i loro dati vengono
+  // rimossi automaticamente. Il file/cartella su Google Drive NON viene toccato:
+  // va eventualmente rimosso a mano. Richiede doppio click (conferma) per sicurezza.
+  const eliminaCommessa = async () => {
+    if (!form.id) return;
+    if (!confermaElimina) { setConfermaElimina(true); return; } // primo click: arma la conferma
+    setEliminazioneStato("eliminando");
+    setErroreEliminazione("");
+    try {
+      const { error } = await supabase.from("commesse").delete().eq("id", form.id);
+      if (error) throw error;
+      setConfermaElimina(false);
+      setEliminazioneStato("idle");
+      setForm(FORM_VUOTO);
+      onCambiaCommessa?.(null);
+      await onCommessaSalvata?.();
+    } catch (e) {
+      setErroreEliminazione(e.message || "Errore durante l'eliminazione della commessa.");
+      setEliminazioneStato("errore");
     }
   };
 
@@ -1361,11 +1390,38 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
           ))}
         </div>
       )}
+
+      {/* eliminazione commessa: solo su commessa esistente, con doppio click */}
+      {form.id && (
+        <div style={{ marginTop:20, paddingTop:16, borderTop:"1px solid #1e293b" }}>
+          {!confermaElimina ? (
+            <button onClick={eliminaCommessa}
+              style={{ background:"none", color:"#fca5a5", border:"1px solid #ef444433", borderRadius:8, padding:"8px 16px", cursor:"pointer", fontSize:"0.82rem", fontWeight:700 }}>
+              🗑 Elimina questa commessa
+            </button>
+          ) : (
+            <div style={{ background:"#450a0a22", border:"1px solid #ef444455", borderRadius:8, padding:"12px 16px" }}>
+              <div style={{ color:"#fca5a5", fontSize:"0.85rem", marginBottom:10 }}>
+                Eliminare definitivamente la commessa "{form.nome}"? Verranno rimossi anche tutti i dati collegati (workflow, pratiche, budget). L'operazione non si può annullare. La cartella su Google Drive resta e va eventualmente rimossa a mano.
+              </div>
+              <div style={{ display:"flex", gap:8 }}>
+                <button onClick={eliminaCommessa} disabled={eliminazioneStato==="eliminando"}
+                  style={{ background:"#7f1d1d", color:"#fff", border:"none", borderRadius:8, padding:"8px 16px", cursor:"pointer", fontSize:"0.82rem", fontWeight:700, opacity: eliminazioneStato==="eliminando"?0.6:1 }}>
+                  {eliminazioneStato==="eliminando" ? "Eliminazione…" : "Sì, elimina definitivamente"}
+                </button>
+                <button onClick={() => { setConfermaElimina(false); setErroreEliminazione(""); }} disabled={eliminazioneStato==="eliminando"}
+                  style={{ background:"#1e293b", color:"#94a3b8", border:"1px solid #334155", borderRadius:8, padding:"8px 16px", cursor:"pointer", fontSize:"0.82rem" }}>
+                  Annulla
+                </button>
+              </div>
+              {eliminazioneStato==="errore" && <div style={{ color:"#fca5a5", fontSize:"0.78rem", marginTop:8 }}>{erroreEliminazione}</div>}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
-
-// ── GEMINI API KEY — salvata in modo permanente nel browser ────────────────────
 const GEMINI_KEY_STORAGE = "ovs_gemini_api_key";
 const getStoredApiKey = () => {
   try { return localStorage.getItem(GEMINI_KEY_STORAGE) || ""; } catch { return ""; }
@@ -2374,11 +2430,429 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
   );
 }
 
+// ── TAB VOCALE ────────────────────────────────────────────────────────────
+
+// Prompt condiviso che spiega all'AI cosa fare con la trascrizione, dato un
+// elenco di attività Workflow (con stato attuale) e le richieste libere già
+// esistenti per la commessa. Usato sia in modalità singola che multipla.
+const costruisciPromptVocale = (contestoCommesse) => {
+  const elencoAttivita = WORKFLOW.map(w => `${w.id}. ${w.titolo}`).join("\n");
+  const blocchiCommesse = contestoCommesse.map(c => {
+    const fatte = (c.workflowCompletati || []).join(", ") || "nessuna";
+    const richiesteAperte = (c.richiesteAperte || []).map(r => `- "${r.testo}" (aperta dal ${new Date(r.creato_il).toLocaleDateString("it-IT")})`).join("\n") || "nessuna richiesta aperta";
+    const richiesteFatte = (c.richiesteFatte || []).map(r => `- "${r.testo}" (fatta il ${new Date(r.creato_il).toLocaleDateString("it-IT")})`).join("\n") || "nessuna";
+    return `### Commessa "${c.nome}" (id: ${c.id})\nAttività Workflow già completate (id): ${fatte}\nRichieste libere ancora aperte per questa commessa:\n${richiesteAperte}\nRichieste libere già segnate come fatte per questa commessa (usa questo elenco per capire se qualcosa nel vocale è un duplicato):\n${richiesteFatte}`;
+  }).join("\n\n");
+
+  return `Sei un assistente che aggiorna lo stato di avanzamento di una o più commesse di apertura punti vendita retail, a partire dalla trascrizione di un vocale registrato da un tecnico.
+
+ELENCO ATTIVITÀ STANDARD DEL WORKFLOW (id e titolo):
+${elencoAttivita}
+
+CONTESTO ATTUALE DELLE COMMESSE COINVOLTE:
+${blocchiCommesse}
+
+Ascolta l'audio fornito e fai quanto segue:
+1. Trascrivi fedelmente l'audio in italiano.
+2. Per ciascuna commessa coinvolta nel discorso, individua quali attività standard del Workflow (dall'elenco sopra) risultano completate secondo quanto detto, riportando il loro id numerico. Riporta SOLO le attività NON già presenti nell'elenco "già completate" per quella commessa.
+3. Individua eventuali richieste o task specifici menzionati (es. "bisogna ordinare X", "il cliente ha chiesto Y", "manca ancora Z") che NON sono attività standard del Workflow. Per ciascuna, scrivi una frase breve e chiara che riassuma la richiesta.
+4. Per ogni richiesta individuata al punto 3, confronta con le "richieste già segnate come fatte" per quella commessa: se sembra riferirsi alla STESSA richiesta (anche con parole diverse) e questo vocale la conferma come fatta o ne parla di nuovo, imposta "possibile_duplicato": true e riporta il testo esatto della richiesta precedente in "duplicato_di_testo". Se invece è chiaramente una richiesta nuova, imposta "possibile_duplicato": false.
+5. Se non sei sicuro a quale commessa si riferisce una parte del discorso (capita solo se ci sono più commesse), assegnala alla commessa più plausibile in base al contesto; se è genuinamente ambigua, ometti quella parte piuttosto che indovinare a caso.
+
+Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backtick, con questa struttura esatta:
+{
+  "trascrizione": "trascrizione completa e fedele dell'audio",
+  "aggiornamenti": [
+    {
+      "commessa_id": "id esatto copiato dal contesto sopra",
+      "attivita_completate": [elenco di id numerici del Workflow risultati completati, solo i nuovi],
+      "nuove_richieste": [
+        { "testo": "descrizione breve della richiesta", "stato": "aperta oppure fatta, secondo quanto detto nel vocale", "possibile_duplicato": true o false, "duplicato_di_testo": "testo della richiesta precedente se possibile_duplicato è true, altrimenti stringa vuota" }
+      ]
+    }
+  ]
+}
+Se il vocale non riguarda nessuna commessa specifica o non contiene aggiornamenti utili, restituisci comunque la trascrizione con "aggiornamenti": [].`;
+};
+
+function TabVocale({ commessaIdGlobale, commesse, commessaSelezionata }) {
+  const [apiKey, setApiKey] = useState(() => getStoredApiKey());
+  const [apiKeySaved, setApiKeySaved] = useState(() => !!getStoredApiKey());
+  const [modalita, setModalita] = useState("singola"); // "singola" | "multipla"
+  const [commesseMultiple, setCommesseMultiple] = useState([]); // array di id, per la modalità multipla
+  const [registrazione, setRegistrazione] = useState("idle"); // idle | recording | elaborazione | fatto | errore
+  const [erroreVocale, setErroreVocale] = useState("");
+  const [ultimoRisultato, setUltimoRisultato] = useState(null); // { trascrizione, aggiornamentiPerCommessa: [{nome, attivitaNuove, richiesteNuove}] }
+  const [richiesteVisualizzate, setRichiesteVisualizzate] = useState([]);
+  const [caricamentoRichieste, setCaricamentoRichieste] = useState(false);
+
+  const mediaRecorderRef = React.useRef(null);
+  const chunksRef = React.useRef([]);
+
+  const commesseSelezionateAttuali = modalita === "singola"
+    ? (commessaSelezionata ? [commessaSelezionata] : [])
+    : commesse.filter(c => commesseMultiple.includes(c.id));
+
+  // Carica le richieste libere della commessa attiva (solo modalità singola,
+  // dove ha senso mostrare la tabella di una commessa specifica) per
+  // mostrarle nella tabella interattiva sotto.
+  useEffect(() => {
+    if (modalita !== "singola" || !commessaIdGlobale) {
+      setRichiesteVisualizzate([]);
+      return;
+    }
+    (async () => {
+      setCaricamentoRichieste(true);
+      const { data, error } = await supabase
+        .from("richieste_libere")
+        .select("*")
+        .eq("commessa_id", commessaIdGlobale)
+        .order("creato_il", { ascending:false });
+      if (!error && data) setRichiesteVisualizzate(data);
+      setCaricamentoRichieste(false);
+    })();
+  }, [commessaIdGlobale, modalita, ultimoRisultato]);
+
+  const ricaricaRichieste = async () => {
+    if (!commessaIdGlobale) return;
+    const { data, error } = await supabase
+      .from("richieste_libere")
+      .select("*")
+      .eq("commessa_id", commessaIdGlobale)
+      .order("creato_il", { ascending:false });
+    if (!error && data) setRichiesteVisualizzate(data);
+  };
+
+  const toBase64Blob = (blob) => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(",")[1]);
+    r.onerror = () => rej(new Error("Errore lettura audio registrato"));
+    r.readAsDataURL(blob);
+  });
+
+  const avviaRegistrazione = async () => {
+    setErroreVocale("");
+    if (!apiKey) { setErroreVocale("Inserisci prima la chiave API Gemini qui sotto."); return; }
+    if (commesseSelezionateAttuali.length === 0) {
+      setErroreVocale(modalita === "singola" ? "Seleziona una commessa dal menu in alto." : "Seleziona almeno una commessa per la modalità multipla.");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : (MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "");
+      const recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      chunksRef.current = [];
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      recorder.onstop = () => { stream.getTracks().forEach(t => t.stop()); };
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setRegistrazione("recording");
+    } catch (e) {
+      setErroreVocale("Impossibile accedere al microfono: " + (e.message || "permesso negato.") + " Controlla i permessi del browser.");
+      setRegistrazione("errore");
+    }
+  };
+
+  const fermaRegistrazione = () => {
+    if (!mediaRecorderRef.current) return;
+    const recorder = mediaRecorderRef.current;
+    recorder.onstop = async () => {
+      recorder.stream.getTracks().forEach(t => t.stop());
+      const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
+      await elaboraVocale(blob);
+    };
+    recorder.stop();
+    setRegistrazione("elaborazione");
+  };
+
+  const elaboraVocale = async (blob) => {
+    try {
+      const audioB64 = await toBase64Blob(blob);
+      const mime = blob.type || "audio/webm";
+
+      // Per ogni commessa coinvolta, recupera lo stato attuale (attività
+      // workflow completate e richieste libere) per dare contesto all'AI e
+      // permetterle di individuare duplicati e attività nuove.
+      const contestoCommesse = [];
+      for (const c of commesseSelezionateAttuali) {
+        const { data: wf } = await supabase.from("workflow_completato").select("workflow_id").eq("commessa_id", c.id);
+        const { data: ric } = await supabase.from("richieste_libere").select("*").eq("commessa_id", c.id);
+        contestoCommesse.push({
+          id: c.id,
+          nome: c.nome,
+          workflowCompletati: (wf || []).map(r => r.workflow_id),
+          richiesteAperte: (ric || []).filter(r => r.stato === "aperta"),
+          richiesteFatte: (ric || []).filter(r => r.stato === "fatta"),
+        });
+      }
+
+      const promptText = costruisciPromptVocale(contestoCommesse);
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${apiKey}`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ parts: [{ text: promptText }, { inline_data: { mime_type: mime, data: audioB64 } }] }] }) }
+      );
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+
+      let testo = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      testo = testo.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(testo);
+
+      // Salva il log del vocale
+      const idsCommesse = commesseSelezionateAttuali.map(c => c.id);
+      const { data: logSalvato } = await supabase.from("vocali_log").insert({
+        trascrizione: parsed.trascrizione || "",
+        modalita,
+        commesse_coinvolte: idsCommesse,
+      }).select().single();
+
+      const riepilogoPerCommessa = [];
+
+      for (const agg of (parsed.aggiornamenti || [])) {
+        const commessaRif = commesseSelezionateAttuali.find(c => c.id === agg.commessa_id);
+        if (!commessaRif) continue;
+
+        // 1) Spunta le attività Workflow risultate completate
+        const nuoveAttivita = (agg.attivita_completate || []).filter(id => WORKFLOW.some(w => w.id === id));
+        for (const wId of nuoveAttivita) {
+          await supabase.from("workflow_completato").insert({ commessa_id: commessaRif.id, workflow_id: wId }).select();
+        }
+
+        // 2) Aggiunge le nuove richieste libere, con flag duplicato se segnalato
+        const richiesteInserite = [];
+        for (const r of (agg.nuove_richieste || [])) {
+          if (!r.testo) continue;
+          let duplicatoDiId = null;
+          if (r.possibile_duplicato && r.duplicato_di_testo) {
+            const { data: match } = await supabase
+              .from("richieste_libere")
+              .select("id")
+              .eq("commessa_id", commessaRif.id)
+              .eq("testo", r.duplicato_di_testo)
+              .limit(1);
+            if (match && match[0]) duplicatoDiId = match[0].id;
+          }
+          const { data: inserita } = await supabase.from("richieste_libere").insert({
+            commessa_id: commessaRif.id,
+            testo: r.testo,
+            stato: r.stato === "fatta" ? "fatta" : "aperta",
+            possibile_duplicato: !!r.possibile_duplicato,
+            duplicato_di: duplicatoDiId,
+            vocale_id: logSalvato?.id || null,
+          }).select().single();
+          if (inserita) richiesteInserite.push(inserita);
+        }
+
+        riepilogoPerCommessa.push({
+          nome: commessaRif.nome,
+          attivitaNuove: nuoveAttivita.map(id => WORKFLOW.find(w => w.id === id)?.titolo).filter(Boolean),
+          richiesteNuove: richiesteInserite,
+        });
+      }
+
+      setUltimoRisultato({ trascrizione: parsed.trascrizione || "", aggiornamentiPerCommessa: riepilogoPerCommessa });
+      setRegistrazione("fatto");
+      await ricaricaRichieste();
+    } catch (e) {
+      setErroreVocale(e.message || "Errore durante l'elaborazione del vocale.");
+      setRegistrazione("errore");
+    }
+  };
+
+  const segnaStato = async (richiesta, nuovoStato) => {
+    await supabase.from("richieste_libere").update({ stato: nuovoStato }).eq("id", richiesta.id);
+    setRichiesteVisualizzate(prev => prev.map(r => r.id === richiesta.id ? { ...r, stato: nuovoStato } : r));
+  };
+
+  const eliminaRichiesta = async (richiesta) => {
+    await supabase.from("richieste_libere").delete().eq("id", richiesta.id);
+    setRichiesteVisualizzate(prev => prev.filter(r => r.id !== richiesta.id));
+  };
+
+  const esportaExcel = async () => {
+    const XLSX = await loadSheetJS();
+    const wb = XLSX.utils.book_new();
+
+    // Foglio 1: attività Workflow standard, con stato per la commessa attiva
+    if (commessaIdGlobale) {
+      const { data: wf } = await supabase.from("workflow_completato").select("workflow_id").eq("commessa_id", commessaIdGlobale);
+      const completatiSet = new Set((wf || []).map(r => r.workflow_id));
+      const righeWorkflow = WORKFLOW.map(w => ({ Fase: w.fase, Attività: w.titolo, Stato: completatiSet.has(w.id) ? "FATTO" : "DA FARE" }));
+      const wsWorkflow = XLSX.utils.json_to_sheet(righeWorkflow);
+      XLSX.utils.book_append_sheet(wb, wsWorkflow, "Workflow");
+    }
+
+    // Foglio 2: richieste libere
+    const righeRichieste = richiesteVisualizzate.map(r => ({
+      Richiesta: r.testo,
+      Stato: r.stato === "fatta" ? "FATTA" : "APERTA",
+      "Possibile duplicato": r.possibile_duplicato ? "SI — verificare" : "",
+      "Creata il": new Date(r.creato_il).toLocaleString("it-IT"),
+    }));
+    const wsRichieste = XLSX.utils.json_to_sheet(righeRichieste);
+    XLSX.utils.book_append_sheet(wb, wsRichieste, "Richieste");
+
+    const nomeFile = `Avanzamento_${(commessaSelezionata?.nome || "commessa").replace(/[^a-zA-Z0-9]/g,"_")}.xlsx`;
+    XLSX.writeFile(wb, nomeFile);
+  };
+
+  const inpStyle = { background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.88rem" };
+
+  return (
+    <div>
+      {/* chiave API */}
+      <div style={{ background:"#1e293b", border:"1px solid #334155", borderRadius:10, padding:14, marginBottom:20 }}>
+        <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:6 }}>Chiave API Gemini</label>
+        <div style={{ display:"flex", gap:8 }}>
+          <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder="Incolla qui la tua chiave API" style={inpStyle} />
+          <button onClick={() => { setStoredApiKey(apiKey); setApiKeySaved(true); }} style={{ background:"#3b82f6", color:"#fff", border:"none", borderRadius:8, padding:"8px 16px", cursor:"pointer", fontSize:"0.85rem", fontWeight:600, whiteSpace:"nowrap" }}>Salva</button>
+        </div>
+        {!apiKeySaved && <div style={{ color:"#475569", fontSize:"0.75rem", marginTop:6 }}>Ottieni la chiave gratuita su aistudio.google.com → Get API Key.</div>}
+      </div>
+
+      {/* modalità */}
+      <div style={{ display:"flex", gap:8, marginBottom:16 }}>
+        <button onClick={() => setModalita("singola")}
+          style={{ flex:1, background: modalita==="singola" ? "#3b82f6" : "#1e293b", color: modalita==="singola" ? "#fff" : "#94a3b8", border:`1px solid ${modalita==="singola"?"#3b82f6":"#334155"}`, borderRadius:8, padding:"10px 14px", cursor:"pointer", fontSize:"0.85rem", fontWeight:600 }}>
+          🎯 Vocale su commessa singola
+        </button>
+        <button onClick={() => setModalita("multipla")}
+          style={{ flex:1, background: modalita==="multipla" ? "#3b82f6" : "#1e293b", color: modalita==="multipla" ? "#fff" : "#94a3b8", border:`1px solid ${modalita==="multipla"?"#3b82f6":"#334155"}`, borderRadius:8, padding:"10px 14px", cursor:"pointer", fontSize:"0.85rem", fontWeight:600 }}>
+          🗂 Vocale su più commesse
+        </button>
+      </div>
+
+      {modalita === "singola" && (
+        <div style={{ marginBottom:16 }}>
+          {!commessaSelezionata
+            ? <div style={{ color:"#64748b", fontSize:"0.82rem", background:"#1e293b", border:"1px solid #334155", borderRadius:8, padding:"10px 14px" }}>Seleziona una commessa dal menu in alto per registrare un aggiornamento vocale.</div>
+            : <div style={{ color:"#7dd3fc", fontSize:"0.82rem", background:"#0c3547", border:"1px solid #1e3a5f", borderRadius:8, padding:"10px 14px" }}>📁 Commessa attiva: <strong>{commessaSelezionata.nome}</strong></div>
+          }
+        </div>
+      )}
+
+      {modalita === "multipla" && (
+        <div style={{ marginBottom:16 }}>
+          <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:6 }}>Seleziona le commesse coinvolte nel vocale (l'AI capirà da sola a quale parte del discorso si riferisce ognuna)</label>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+            {commesse.map(c => {
+              const attiva = commesseMultiple.includes(c.id);
+              return (
+                <button key={c.id}
+                  onClick={() => setCommesseMultiple(prev => attiva ? prev.filter(x=>x!==c.id) : [...prev, c.id])}
+                  style={{ background: attiva ? "#1d4ed8" : "#1e293b", color: attiva ? "#fff" : "#94a3b8", border:`1px solid ${attiva?"#3b82f6":"#334155"}`, borderRadius:8, padding:"6px 12px", cursor:"pointer", fontSize:"0.8rem" }}>
+                  {attiva ? "✓ " : ""}{c.nome}
+                </button>
+              );
+            })}
+          </div>
+          {commesse.length === 0 && <div style={{ color:"#475569", fontSize:"0.78rem", marginTop:6 }}>Nessuna commessa disponibile per il brand selezionato in alto.</div>}
+        </div>
+      )}
+
+      {/* registrazione */}
+      <div style={{ background:"#0f172a", border:"2px dashed #334155", borderRadius:12, padding:"24px 16px", textAlign:"center", marginBottom:20 }}>
+        {registrazione !== "recording" ? (
+          <button onClick={avviaRegistrazione}
+            style={{ background:"#dc2626", color:"#fff", border:"none", borderRadius:99, width:64, height:64, fontSize:"1.6rem", cursor:"pointer", marginBottom:10 }}>
+            🎙
+          </button>
+        ) : (
+          <button onClick={fermaRegistrazione}
+            style={{ background:"#dc2626", color:"#fff", border:"none", borderRadius:16, width:64, height:64, fontSize:"1.6rem", cursor:"pointer", marginBottom:10, animation:"pulse 1.5s infinite" }}>
+            ⏹
+          </button>
+        )}
+        <div style={{ color:"#94a3b8", fontSize:"0.85rem" }}>
+          {registrazione === "idle" && "Tocca per iniziare a registrare"}
+          {registrazione === "recording" && "🔴 Registrazione in corso — tocca per fermare e analizzare"}
+          {registrazione === "elaborazione" && "⏳ Trascrizione e analisi AI in corso…"}
+          {registrazione === "fatto" && "✓ Vocale elaborato — vedi il riepilogo sotto"}
+          {registrazione === "errore" && "⚠ Si è verificato un errore"}
+        </div>
+        {erroreVocale && <div style={{ color:"#fca5a5", fontSize:"0.8rem", marginTop:10 }}>{erroreVocale}</div>}
+      </div>
+
+      {/* riepilogo ultimo vocale */}
+      {ultimoRisultato && (
+        <div style={{ background:"#1e293b", border:"1px solid #1e3a5f", borderRadius:10, padding:16, marginBottom:20 }}>
+          <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.9rem", marginBottom:10 }}>📝 Trascrizione</div>
+          <div style={{ color:"#cbd5e1", fontSize:"0.85rem", lineHeight:1.5, marginBottom:14, fontStyle:"italic" }}>"{ultimoRisultato.trascrizione}"</div>
+          {ultimoRisultato.aggiornamentiPerCommessa.length === 0 && (
+            <div style={{ color:"#64748b", fontSize:"0.82rem" }}>Nessun aggiornamento riconosciuto in questo vocale.</div>
+          )}
+          {ultimoRisultato.aggiornamentiPerCommessa.map((agg, i) => (
+            <div key={i} style={{ borderTop: i>0 ? "1px solid #334155" : "none", paddingTop: i>0 ? 12 : 0, marginTop: i>0 ? 12 : 0 }}>
+              <div style={{ color:"#e2e8f0", fontWeight:600, fontSize:"0.88rem", marginBottom:6 }}>📁 {agg.nome}</div>
+              {agg.attivitaNuove.length > 0 && (
+                <div style={{ marginBottom:8 }}>
+                  <div style={{ color:"#86efac", fontSize:"0.78rem", marginBottom:4 }}>✓ Attività Workflow spuntate:</div>
+                  {agg.attivitaNuove.map((t,j) => <div key={j} style={{ color:"#cbd5e1", fontSize:"0.82rem", marginLeft:12 }}>• {t}</div>)}
+                </div>
+              )}
+              {agg.richiesteNuove.length > 0 && (
+                <div>
+                  <div style={{ color:"#7dd3fc", fontSize:"0.78rem", marginBottom:4 }}>+ Nuove richieste registrate:</div>
+                  {agg.richiesteNuove.map((r,j) => (
+                    <div key={j} style={{ color:"#cbd5e1", fontSize:"0.82rem", marginLeft:12, marginBottom:2 }}>
+                      • {r.testo} {r.stato==="fatta" && <span style={{ color:"#86efac" }}>(fatta)</span>}
+                      {r.possibile_duplicato && <span style={{ color:"#fbbf24" }}> ⚠ possibile duplicato — verificare</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {agg.attivitaNuove.length === 0 && agg.richiesteNuove.length === 0 && (
+                <div style={{ color:"#64748b", fontSize:"0.8rem" }}>Nessun aggiornamento per questa commessa.</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* tabella richieste libere della commessa attiva */}
+      {modalita === "singola" && commessaIdGlobale && (
+        <div>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+            <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.9rem" }}>📋 Stato avanzamento — {commessaSelezionata?.nome}</div>
+            <button onClick={esportaExcel} style={{ background:"#1e293b", color:"#94a3b8", border:"1px solid #334155", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:"0.78rem" }}>
+              📥 Scarica Excel
+            </button>
+          </div>
+          {caricamentoRichieste && <div style={{ color:"#475569", fontSize:"0.78rem", marginBottom:8 }}>Caricamento…</div>}
+          {richiesteVisualizzate.length === 0 && !caricamentoRichieste && (
+            <div style={{ color:"#64748b", fontSize:"0.82rem" }}>Nessuna richiesta libera ancora registrata per questa commessa. Registra un vocale per iniziare.</div>
+          )}
+          {richiesteVisualizzate.map(r => (
+            <div key={r.id} style={{ display:"flex", alignItems:"flex-start", gap:10, background: r.possibile_duplicato ? "#451a0322" : "#1e293b", border:`1px solid ${r.possibile_duplicato ? "#f59e0b55" : "#334155"}`, borderRadius:10, padding:"10px 14px", marginBottom:6 }}>
+              <div style={{ flex:1 }}>
+                <div style={{ color: r.stato==="fatta" ? "#64748b" : "#e2e8f0", fontSize:"0.88rem", textDecoration: r.stato==="fatta" ? "line-through" : "none" }}>{r.testo}</div>
+                <div style={{ display:"flex", gap:10, marginTop:4, flexWrap:"wrap" }}>
+                  <span style={{ color:"#475569", fontSize:"0.72rem" }}>{new Date(r.creato_il).toLocaleDateString("it-IT")}</span>
+                  {r.possibile_duplicato && <span style={{ color:"#fbbf24", fontSize:"0.72rem", fontWeight:700 }}>⚠ possibile duplicato — verificare</span>}
+                </div>
+              </div>
+              <button onClick={() => segnaStato(r, r.stato==="fatta" ? "aperta" : "fatta")}
+                style={{ background: r.stato==="fatta" ? "#14532d" : "#1e293b", color: r.stato==="fatta" ? "#86efac" : "#94a3b8", border:"1px solid #334155", borderRadius:6, padding:"4px 10px", cursor:"pointer", fontSize:"0.75rem", whiteSpace:"nowrap" }}>
+                {r.stato==="fatta" ? "✓ Fatta" : "Segna fatta"}
+              </button>
+              <button onClick={() => eliminaRichiesta(r)}
+                style={{ background:"none", color:"#64748b", border:"1px solid #334155", borderRadius:6, padding:"4px 10px", cursor:"pointer", fontSize:"0.75rem" }}>
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const TABS = [
   { id:"scheda",   label:"📋 Scheda Negozio" },
   { id:"workflow", label:"✅ Workflow" },
   { id:"pratiche", label:"📂 Pratiche Amm." },
   { id:"budget",   label:"💶 Budget HP INV" },
+  { id:"vocale",   label:"🎙 Vocale" },
   { id:"ai",       label:"🤖 Analisi AI" },
   { id:"pdf",      label:"📝 Editor PDF" },
   { id:"documenti",label:"📁 Documenti" },
@@ -2501,6 +2975,7 @@ export default function App() {
         {tab==="budget"   && <TabBudget commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="ai"       && <TabAnalisiAI />}
         {tab==="pdf"      && <TabEditorPDF />}
+        {tab==="vocale"   && <TabVocale commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="documenti"&& <TabDocumenti commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
       </div>
     </div>
