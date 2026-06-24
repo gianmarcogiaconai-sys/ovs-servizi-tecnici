@@ -3227,11 +3227,172 @@ function TabProgetti() {
   );
 }
 
+// ── TAB CRONOPROGRAMMA — caricamento e storico versioni per commessa ───────────
+function TabCronoprogramma({ commessaIdGlobale, commessaSelezionata }) {
+  const commessaId = commessaIdGlobale || "";
+  const [versioni, setVersioni] = useState([]);
+  const [caricamento, setCaricamento] = useState(false);
+  const [errore, setErrore] = useState("");
+  const [uploadStato, setUploadStato] = useState("idle"); // idle | uploading | done | error
+  const [uploadErrore, setUploadErrore] = useState("");
+  const [notaNuova, setNotaNuova] = useState("");
+  const [confermaElimina, setConfermaElimina] = useState(null); // id versione
+
+  const tipoDaNome = (nome) => {
+    const n = nome.toLowerCase();
+    if (n.endsWith(".pdf")) return "pdf";
+    if (n.endsWith(".xls") || n.endsWith(".xlsx") || n.endsWith(".csv")) return "excel";
+    if (n.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/)) return "immagine";
+    return "altro";
+  };
+  const iconaTipo = (tipo) => tipo==="pdf" ? "📄" : tipo==="excel" ? "📊" : tipo==="immagine" ? "🖼" : "📎";
+
+  const carica = async () => {
+    if (!commessaId) { setVersioni([]); return; }
+    setCaricamento(true);
+    setErrore("");
+    try {
+      const { data, error } = await supabase
+        .from("cronoprogrammi")
+        .select("*")
+        .eq("commessa_id", commessaId)
+        .order("caricato_il", { ascending:false });
+      if (error) throw error;
+      setVersioni(data || []);
+    } catch (e) {
+      setErrore(e.message || "Errore durante il caricamento dello storico.");
+    } finally {
+      setCaricamento(false);
+    }
+  };
+
+  useEffect(() => { carica(); }, [commessaId]);
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // permette di ricaricare lo stesso file
+    if (!file || !commessaSelezionata) return;
+    if (!commessaSelezionata.drive_folder_id) {
+      setUploadStato("error");
+      setUploadErrore("Questa commessa non ha ancora una cartella Drive. Creala dalla Scheda Negozio.");
+      return;
+    }
+    setUploadStato("uploading");
+    setUploadErrore("");
+    try {
+      // Trova/crea la sottocartella CRONOPROGRAMMA su Drive e carica il file lì
+      const idCartella = await trovaIdSottocartellaDaPercorso(commessaSelezionata.drive_folder_id, "CRONOPROGRAMMA");
+      const driveFileId = await caricaFileSuDrive(file, idCartella);
+      const driveLink = `https://drive.google.com/file/d/${driveFileId}/view`;
+      // Registra la versione nello storico su Supabase
+      const { data, error } = await supabase.from("cronoprogrammi").insert({
+        commessa_id: commessaSelezionata.id,
+        nome_file: file.name,
+        drive_file_id: driveFileId,
+        drive_link: driveLink,
+        tipo_file: tipoDaNome(file.name),
+        note: notaNuova || null,
+      }).select().single();
+      if (error) throw error;
+      setVersioni(prev => [data, ...prev]);
+      setNotaNuova("");
+      setUploadStato("done");
+      setTimeout(() => setUploadStato("idle"), 2500);
+    } catch (e) {
+      setUploadStato("error");
+      setUploadErrore(e.message || "Errore durante il caricamento del file.");
+    }
+  };
+
+  const eliminaVersione = async (id) => {
+    // Rimuove solo il riferimento dallo storico; il file su Drive resta.
+    try {
+      const { error } = await supabase.from("cronoprogrammi").delete().eq("id", id);
+      if (error) throw error;
+      setVersioni(prev => prev.filter(v => v.id !== id));
+      setConfermaElimina(null);
+    } catch (e) {
+      setErrore(e.message || "Errore durante l'eliminazione.");
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ marginBottom:8, color:"#94a3b8", fontSize:"0.9rem" }}>
+        Carica e consulta il cronoprogramma di cantiere della commessa. Ogni caricamento viene aggiunto allo storico, così tieni traccia di tutte le versioni nel tempo. I file vengono salvati nella cartella CRONOPROGRAMMA su Google Drive.
+      </div>
+
+      {/* indicazione commessa attiva */}
+      <div style={{ marginBottom:18 }}>
+        {!commessaId && <div style={{ color:"#64748b", fontSize:"0.82rem", background:"#1e293b", border:"1px solid #334155", borderRadius:8, padding:"10px 14px" }}>Seleziona una commessa dal menu in alto per gestire il cronoprogramma.</div>}
+        {commessaId && commessaSelezionata && (
+          <div style={{ color:"#7dd3fc", fontSize:"0.82rem", background:"#0c3547", border:"1px solid #1e3a5f", borderRadius:8, padding:"10px 14px" }}>📁 Commessa attiva: <strong>{commessaSelezionata.nome}</strong></div>
+        )}
+        {commessaId && commessaSelezionata && !commessaSelezionata.drive_folder_id && (
+          <div style={{ color:"#fbbf24", fontSize:"0.75rem", marginTop:6 }}>⚠ Questa commessa non ha ancora una cartella Drive. Creala dalla Scheda Negozio prima di caricare.</div>
+        )}
+      </div>
+
+      {commessaId && (
+        <>
+          {/* upload nuova versione */}
+          <div style={{ background:"#1e293b", border:"1px solid #334155", borderRadius:12, padding:16, marginBottom:20 }}>
+            <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.82rem", marginBottom:10 }}>📅 CARICA NUOVA VERSIONE DEL CRONOPROGRAMMA</div>
+            <input value={notaNuova} onChange={e=>setNotaNuova(e.target.value)} placeholder="Nota sulla versione (opzionale, es. 'rev. 2 post sopralluogo')" style={{ background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.85rem", marginBottom:10 }} />
+            <label style={{ display:"inline-block", background: uploadStato==="uploading"?"#475569":"#1d4ed8", color:"#fff", borderRadius:8, padding:"8px 16px", cursor: uploadStato==="uploading"?"wait":"pointer", fontWeight:700, fontSize:"0.82rem" }}>
+              {uploadStato==="uploading" ? "Caricamento su Drive…" : "Scegli file (PDF, Excel, immagine)"}
+              <input type="file" accept=".pdf,.xls,.xlsx,.csv,image/*" onChange={handleFile} style={{ display:"none" }} disabled={uploadStato==="uploading" || !commessaSelezionata?.drive_folder_id} />
+            </label>
+            {uploadStato==="done" && <div style={{ color:"#86efac", fontSize:"0.8rem", marginTop:8 }}>✓ Versione caricata e aggiunta allo storico.</div>}
+            {uploadStato==="error" && <div style={{ color:"#fca5a5", fontSize:"0.8rem", marginTop:8 }}>{uploadErrore}</div>}
+          </div>
+
+          {/* storico versioni */}
+          <div style={{ color:"#7dd3fc", fontSize:"0.78rem", fontWeight:700, letterSpacing:"0.06em", marginBottom:10 }}>STORICO VERSIONI</div>
+          {caricamento && <div style={{ color:"#7dd3fc", fontSize:"0.82rem" }}>Caricamento storico…</div>}
+          {errore && <div style={{ color:"#fca5a5", fontSize:"0.82rem", marginBottom:10 }}>{errore}</div>}
+          {!caricamento && versioni.length===0 && <div style={{ color:"#64748b", fontSize:"0.85rem", background:"#1e293b", border:"1px solid #334155", borderRadius:8, padding:"12px 14px" }}>Nessun cronoprogramma caricato per questa commessa.</div>}
+
+          {versioni.map((v, idx) => (
+            <div key={v.id} style={{ display:"flex", alignItems:"center", gap:12, background:"#1e293b", border:`1px solid ${idx===0?"#3b82f6":"#334155"}`, borderRadius:10, padding:"12px 14px", marginBottom:7 }}>
+              <div style={{ fontSize:"1.4rem" }}>{iconaTipo(v.tipo_file)}</div>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                  <span style={{ color:"#e2e8f0", fontWeight:600, fontSize:"0.9rem", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{v.nome_file}</span>
+                  {idx===0 && <span style={{ background:"#1e3a5f", color:"#7dd3fc", fontSize:"0.68rem", fontWeight:700, padding:"2px 8px", borderRadius:99 }}>PIÙ RECENTE</span>}
+                </div>
+                <div style={{ color:"#64748b", fontSize:"0.75rem", marginTop:2 }}>
+                  {new Date(v.caricato_il).toLocaleString("it-IT")}{v.note ? ` — ${v.note}` : ""}
+                </div>
+              </div>
+              {v.drive_link && (
+                <a href={v.drive_link} target="_blank" rel="noopener noreferrer" style={{ background:"#0f172a", color:"#7dd3fc", border:"1px solid #334155", borderRadius:6, padding:"5px 12px", fontSize:"0.78rem", fontWeight:700, textDecoration:"none", whiteSpace:"nowrap" }}>
+                  Apri ↗
+                </a>
+              )}
+              {confermaElimina === v.id ? (
+                <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+                  <button onClick={()=>eliminaVersione(v.id)} style={{ background:"#7f1d1d", color:"#fff", border:"none", borderRadius:6, padding:"5px 10px", cursor:"pointer", fontSize:"0.75rem", fontWeight:700 }}>Elimina</button>
+                  <button onClick={()=>setConfermaElimina(null)} style={{ background:"#0f172a", color:"#94a3b8", border:"1px solid #334155", borderRadius:6, padding:"5px 10px", cursor:"pointer", fontSize:"0.75rem" }}>Annulla</button>
+                </div>
+              ) : (
+                <button onClick={()=>setConfermaElimina(v.id)} title="Rimuovi dallo storico (il file su Drive resta)" style={{ background:"none", color:"#64748b", border:"none", cursor:"pointer", fontSize:"0.95rem" }}>✕</button>
+              )}
+            </div>
+          ))}
+          {versioni.length>0 && <div style={{ color:"#475569", fontSize:"0.72rem", marginTop:8 }}>La ✕ rimuove la versione solo dallo storico nell'app; il file rimane su Google Drive nella cartella CRONOPROGRAMMA.</div>}
+        </>
+      )}
+    </div>
+  );
+}
+
 const TABS_APERTURE = [
   { id:"scheda",   label:"📋 Scheda Negozio" },
   { id:"workflow", label:"✅ Workflow" },
   { id:"pratiche", label:"📂 Pratiche Amm." },
   { id:"budget",   label:"💶 Budget HP INV" },
+  { id:"crono",    label:"📅 Cronoprogramma" },
   { id:"vocale",   label:"🎙 Vocale" },
   { id:"ai",       label:"🤖 Analisi AI" },
   { id:"pdf",      label:"📝 Editor PDF" },
@@ -3382,6 +3543,7 @@ export default function App() {
         {tab==="workflow" && <TabWorkflow commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="pratiche" && <TabPratiche commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="budget"   && <TabBudget commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
+        {tab==="crono"    && <TabCronoprogramma commessaIdGlobale={commessaIdGlobale} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="ai"       && <TabAnalisiAI />}
         {tab==="pdf"      && <TabEditorPDF />}
         {tab==="vocale"   && <TabVocale commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
