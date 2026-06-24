@@ -1255,9 +1255,9 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
   );
 }
 
-const FORM_VUOTO = { id:null, nome:"", brand:"OVS", responsabile:"", tecnico:"", periodo:"", indirizzo:"", citta:"", mq_vendita:0, mq_riserva:0, mq_totali:0, note:"", drive_folder_id:null };
+const FORM_VUOTO = { id:null, nome:"", brand:"OVS", tipo:"apertura", responsabile:"", tecnico:"", periodo:"", indirizzo:"", citta:"", mq_vendita:0, mq_riserva:0, mq_totali:0, note:"", drive_folder_id:null };
 
-function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSalvata }) {
+function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSalvata, tipoDefault }) {
   const [form, setForm] = useState(FORM_VUOTO);
   const [salvataggio, setSalvataggio] = useState("idle"); // idle | saving | saved | error
   const [erroreSalvataggio, setErroreSalvataggio] = useState("");
@@ -1270,12 +1270,16 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
   const inpStyle = { background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.9rem" };
 
+  // Form vuoto per una nuova commessa, con il tipo (apertura/ristrutturazione)
+  // preimpostato in base al filtro attivo nell'header.
+  const formVuoto = () => ({ ...FORM_VUOTO, tipo: tipoDefault || "apertura" });
+
   const selezionaCommessa = (id) => {
     setConfermaElimina(false);
     setErroreEliminazione("");
-    if (!id) { setForm(FORM_VUOTO); onCambiaCommessa?.(null); return; }
+    if (!id) { setForm(formVuoto()); onCambiaCommessa?.(null); return; }
     const c = commesse.find(x => x.id === id);
-    if (c) setForm({ ...FORM_VUOTO, ...c });
+    if (c) setForm({ ...FORM_VUOTO, ...c, tipo: c.tipo || "apertura" });
     onCambiaCommessa?.(id || null);
   };
 
@@ -1284,10 +1288,10 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
   useEffect(() => {
     if (commessaIdGlobale && commessaIdGlobale !== form.id && commesse.length > 0) {
       const c = commesse.find(x => x.id === commessaIdGlobale);
-      if (c) setForm({ ...FORM_VUOTO, ...c });
+      if (c) setForm({ ...FORM_VUOTO, ...c, tipo: c.tipo || "apertura" });
     }
     if (!commessaIdGlobale && form.id) {
-      setForm(FORM_VUOTO);
+      setForm(formVuoto());
     }
   }, [commessaIdGlobale, commesse]);
 
@@ -1297,7 +1301,7 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
     setErroreSalvataggio("");
 
     const payload = {
-      nome: form.nome, brand: form.brand, responsabile: form.responsabile, tecnico: form.tecnico,
+      nome: form.nome, brand: form.brand, tipo: form.tipo || "apertura", responsabile: form.responsabile, tecnico: form.tecnico,
       periodo: form.periodo, indirizzo: form.indirizzo, citta: form.citta,
       mq_vendita: form.mq_vendita || null, mq_riserva: form.mq_riserva || null, mq_totali: form.mq_totali || null,
       note: form.note,
@@ -1355,7 +1359,7 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
       if (error) throw error;
       setConfermaElimina(false);
       setEliminazioneStato("idle");
-      setForm(FORM_VUOTO);
+      setForm(formVuoto());
       onCambiaCommessa?.(null);
       await onCommessaSalvata?.();
     } catch (e) {
@@ -1384,6 +1388,7 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
       <div style={{ color:"#64748b", fontSize:"0.82rem", marginBottom:18 }}>Compila la scheda del negozio. Salvando, la commessa resta disponibile anche negli altri tab e dopo aver chiuso l'app.</div>
       {[
         { label:"Nome negozio / ID commessa", key:"nome" },
+        { label:"Aperture / Ristrutturazioni", key:"tipo", type:"select", opts:[{v:"apertura",l:"Apertura"},{v:"ristrutturazione",l:"Ristrutturazione"}] },
         { label:"Brand", key:"brand", type:"select", opts:BRAND_LIST },
         { label:"Responsabile commessa", key:"responsabile" },
         { label:"Tecnico", key:"tecnico" },
@@ -1392,7 +1397,9 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
           <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:4 }}>{f.label}</label>
           {f.type==="select"
             ? <select value={form[f.key]} onChange={e=>set(f.key,e.target.value)} style={{ ...inpStyle, cursor:"pointer" }}>
-                {f.opts.map(o=><option key={o}>{o}</option>)}
+                {f.opts.map(o => typeof o === "object"
+                  ? <option key={o.v} value={o.v}>{o.l}</option>
+                  : <option key={o}>{o}</option>)}
               </select>
             : <input type={f.type||"text"} value={form[f.key]} onChange={e=>set(f.key,e.target.value)} style={inpStyle} />
           }
@@ -1500,7 +1507,7 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
       {form.nome && (
         <div style={{ background:"#0f172a", border:"1px solid #1e3a5f", borderRadius:12, padding:18, marginTop:8 }}>
           <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"1rem", marginBottom:10 }}>📋 Scheda negozio</div>
-          {[["Brand", form.brand],["Commessa",form.nome],["Responsabile",form.responsabile],["Tecnico",form.tecnico],["Periodo",formattaPeriodo(form.periodo)],["Indirizzo",`${form.indirizzo}${form.citta?" – "+form.citta:""}`],["MQ vendita",form.mq_vendita?form.mq_vendita+" mq":""],["MQ riserva",form.mq_riserva?form.mq_riserva+" mq":""],["MQ totali",form.mq_totali?form.mq_totali+" mq":""]].filter(([,v])=>v).map(([k,v])=>(
+          {[["Tipo", form.tipo==="ristrutturazione"?"Ristrutturazione":"Apertura"],["Brand", form.brand],["Commessa",form.nome],["Responsabile",form.responsabile],["Tecnico",form.tecnico],["Periodo",formattaPeriodo(form.periodo)],["Indirizzo",`${form.indirizzo}${form.citta?" – "+form.citta:""}`],["MQ vendita",form.mq_vendita?form.mq_vendita+" mq":""],["MQ riserva",form.mq_riserva?form.mq_riserva+" mq":""],["MQ totali",form.mq_totali?form.mq_totali+" mq":""]].filter(([,v])=>v).map(([k,v])=>(
             <div key={k} style={{ display:"flex", gap:8, marginBottom:5 }}>
               <span style={{ color:"#475569", width:120, fontSize:"0.82rem", flexShrink:0 }}>{k}</span>
               <span style={{ color:"#e2e8f0", fontSize:"0.82rem" }}>{v}</span>
@@ -3424,6 +3431,7 @@ export default function App() {
   const [commesseGlobali, setCommesseGlobali] = useState([]);
   const [caricamentoCommesseGlobali, setCaricamentoCommesseGlobali] = useState(true);
   const [filtroBrandGlobale, setFiltroBrandGlobale] = useState("TUTTI");
+  const [filtroTipoGlobale, setFiltroTipoGlobale] = useState("TUTTI"); // TUTTI | apertura | ristrutturazione
 
   const caricaCommesseGlobali = async () => {
     setCaricamentoCommesseGlobali(true);
@@ -3434,7 +3442,12 @@ export default function App() {
 
   useEffect(() => { caricaCommesseGlobali(); }, []);
 
-  const commesseFiltrateGlobali = filtroBrandGlobale === "TUTTI" ? commesseGlobali : commesseGlobali.filter(c => c.brand === filtroBrandGlobale);
+  const commesseFiltrateGlobali = commesseGlobali.filter(c => {
+    const okBrand = filtroBrandGlobale === "TUTTI" || c.brand === filtroBrandGlobale;
+    const tipoCommessa = c.tipo || "apertura"; // le commesse senza tipo sono aperture
+    const okTipo = filtroTipoGlobale === "TUTTI" || tipoCommessa === filtroTipoGlobale;
+    return okBrand && okTipo;
+  });
   const commessaSelezionataGlobale = commesseGlobali.find(c => c.id === commessaIdGlobale);
 
   // Selezionare "+ Nuova commessa" dal menu in alto azzera la selezione e
@@ -3502,9 +3515,18 @@ export default function App() {
             </button>
           </div>
 
-          {/* selettore globale brand + commessa: solo nell'area Aperture */}
+          {/* selettore globale tipo + brand + commessa: solo nell'area Aperture */}
           {area==="aperture" && (
           <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap" }}>
+            <select
+              value={filtroTipoGlobale}
+              onChange={e => { setFiltroTipoGlobale(e.target.value); setCommessaIdGlobale(null); }}
+              style={{ background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"7px 12px", outline:"none", fontSize:"0.85rem", cursor:"pointer" }}
+            >
+              <option value="TUTTI">Aperture e Ristrutturazioni</option>
+              <option value="apertura">Aperture</option>
+              <option value="ristrutturazione">Ristrutturazioni</option>
+            </select>
             <select
               value={filtroBrandGlobale}
               onChange={e => setFiltroBrandGlobale(e.target.value)}
@@ -3539,7 +3561,7 @@ export default function App() {
 
       {/* content */}
       <div style={{ maxWidth:1100, margin:"0 auto", padding:"28px 24px" }}>
-        {tab==="scheda"   && <TabScheda commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} commesse={commesseGlobali} onCommessaSalvata={caricaCommesseGlobali} />}
+        {tab==="scheda"   && <TabScheda commessaIdGlobale={commessaIdGlobale} onCambiaCommessa={setCommessaIdGlobale} commesse={commesseGlobali} onCommessaSalvata={caricaCommesseGlobali} tipoDefault={filtroTipoGlobale === "ristrutturazione" ? "ristrutturazione" : "apertura"} />}
         {tab==="workflow" && <TabWorkflow commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="pratiche" && <TabPratiche commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="budget"   && <TabBudget commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
