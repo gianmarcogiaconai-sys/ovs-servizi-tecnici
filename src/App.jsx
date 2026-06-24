@@ -256,6 +256,44 @@ const caricaFileSuDrive = async (file, folderId) => {
   return data.id;
 };
 
+// Salva (o sovrascrive) un file a nome fisso dentro una cartella Drive: se
+// esiste già un file con quel nome nella cartella, ne aggiorna il contenuto
+// (PATCH media), altrimenti lo crea. Usato per il file Excel unico della
+// Gestione Quotidiana, che si riscrive a ogni aggiornamento.
+const upsertFileFissoSuDrive = async (nomeFile, blob, folderId, mimeType) => {
+  // Cerca un file con quel nome nella cartella
+  const query = encodeURIComponent(`name = '${nomeFile.replace(/'/g, "\\'")}' and '${folderId}' in parents and trashed = false`);
+  const ricerca = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)`);
+  const datiRicerca = await ricerca.json();
+  if (datiRicerca.error) throw new Error(datiRicerca.error.message);
+  const esistente = datiRicerca.files?.[0]?.id || null;
+
+  if (esistente) {
+    // Aggiorna solo il contenuto del file esistente (mantiene lo stesso id/link)
+    const res = await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${esistente}?uploadType=media`, {
+      method: "PATCH",
+      headers: { "Content-Type": mimeType },
+      body: blob,
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message);
+    return data.id;
+  } else {
+    // Crea nuovo file nella cartella
+    const metadata = { name: nomeFile, parents: [folderId] };
+    const form = new FormData();
+    form.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
+    form.append("file", blob);
+    const res = await driveFetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
+      method: "POST",
+      body: form,
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message);
+    return data.id;
+  }
+};
+
 // Trova l'id di una sottocartella esistente cercando una singola cartella
 // figlia per nome, dato l'id della cartella padre.
 const trovaSottocartella = async (nome, parentId) => {
@@ -3051,6 +3089,292 @@ function TabVocale({ commessaIdGlobale, commesse, commessaSelezionata }) {
   );
 }
 
+// ── TAB ATTIVITÀ COMMESSA — lista piatta attività per singola commessa ──────────
+// con aggiornamento vocale tramite Gemini (segna FATTO / aggiunge nuove).
+function TabAttivitaCommessa({ commessaIdGlobale, commessaSelezionata }) {
+  const commessaId = commessaIdGlobale || "";
+  const [attivita, setAttivita] = useState([]);
+  const [caricamento, setCaricamento] = useState(false);
+  const [errore, setErrore] = useState("");
+  const [nuova, setNuova] = useState({ descrizione:"", scadenza:"", note:"" });
+  const [salvando, setSalvando] = useState(false);
+  const apiKey = getStoredApiKey();
+
+  // stato registrazione vocale
+  const [registrazione, setRegistrazione] = useState("idle"); // idle | recording | elaborazione | done | errore
+  const [erroreVocale, setErroreVocale] = useState("");
+  const [riepilogoVocale, setRiepilogoVocale] = useState(null); // { fatte:[], nuove:[] }
+  const mediaRecorderRef = React.useRef(null);
+  const chunksRef = React.useRef([]);
+
+  const inp = { background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", outline:"none", fontSize:"0.88rem", width:"100%" };
+
+  const carica = async () => {
+    if (!commessaId) { setAttivita([]); return; }
+    setCaricamento(true);
+    setErrore("");
+    try {
+      const { data, error } = await supabase.from("attivita_commessa").select("*").eq("commessa_id", commessaId).order("created_at", { ascending:true });
+      if (error) throw error;
+      setAttivita(data || []);
+    } catch (e) {
+      setErrore(e.message || "Errore durante il caricamento delle attività.");
+    } finally {
+      setCaricamento(false);
+    }
+  };
+
+  useEffect(() => { carica(); setRiepilogoVocale(null); }, [commessaId]);
+
+  const aggiungiManuale = async () => {
+    if (!nuova.descrizione.trim() || !commessaId) return;
+    setSalvando(true);
+    try {
+      const { data, error } = await supabase.from("attivita_commessa").insert({
+        commessa_id: commessaId,
+        descrizione: nuova.descrizione.trim(),
+        stato: "DA FARE",
+        scadenza: nuova.scadenza || null,
+        note: nuova.note || null,
+        origine: "manuale",
+      }).select().single();
+      if (error) throw error;
+      setAttivita(prev => [...prev, data]);
+      setNuova({ descrizione:"", scadenza:"", note:"" });
+    } catch (e) {
+      setErrore(e.message || "Errore durante l'aggiunta.");
+    } finally {
+      setSalvando(false);
+    }
+  };
+
+  const toggleStato = async (a) => {
+    const nuovoStato = a.stato === "FATTO" ? "DA FARE" : "FATTO";
+    setAttivita(prev => prev.map(x => x.id === a.id ? { ...x, stato: nuovoStato } : x));
+    try {
+      await supabase.from("attivita_commessa").update({ stato: nuovoStato, updated_at: new Date().toISOString() }).eq("id", a.id);
+    } catch (e) {
+      setErrore(e.message || "Errore durante l'aggiornamento."); carica();
+    }
+  };
+
+  const elimina = async (id) => {
+    setAttivita(prev => prev.filter(x => x.id !== id));
+    try { await supabase.from("attivita_commessa").delete().eq("id", id); }
+    catch (e) { setErrore(e.message || "Errore durante l'eliminazione."); carica(); }
+  };
+
+  // ── registrazione vocale ──
+  const toBase64Blob = (blob) => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(",")[1]);
+    r.onerror = () => rej(new Error("Errore lettura audio"));
+    r.readAsDataURL(blob);
+  });
+
+  const avviaRegistrazione = async () => {
+    setErroreVocale(""); setRiepilogoVocale(null);
+    if (!apiKey) { setErroreVocale("Inserisci prima la API Key Gemini nel tab Documenti o Analisi AI."); setRegistrazione("errore"); return; }
+    if (!commessaId) { setErroreVocale("Seleziona una commessa dal menu in alto."); setRegistrazione("errore"); return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : (MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "");
+      const recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      chunksRef.current = [];
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setRegistrazione("recording");
+    } catch (e) {
+      setErroreVocale("Impossibile accedere al microfono: " + (e.message || "permesso negato.")); setRegistrazione("errore");
+    }
+  };
+
+  const fermaRegistrazione = () => {
+    if (!mediaRecorderRef.current) return;
+    const recorder = mediaRecorderRef.current;
+    recorder.onstop = async () => {
+      recorder.stream.getTracks().forEach(t => t.stop());
+      const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
+      await elaboraVocale(blob);
+    };
+    recorder.stop();
+    setRegistrazione("elaborazione");
+  };
+
+  const elaboraVocale = async (blob) => {
+    try {
+      const audioB64 = await toBase64Blob(blob);
+      const mime = blob.type || "audio/webm";
+      const elencoAttuali = attivita.map(a => `- (id:${a.id}) [${a.stato}] ${a.descrizione}`).join("\n") || "(nessuna attività ancora presente)";
+
+      const promptText = `Sei un assistente che gestisce la lista di attività di un cantiere/negozio per un project manager tecnico. Ascolta l'audio allegato (in italiano) e aggiorna la lista delle attività di questa commessa.
+
+ATTIVITÀ ATTUALI di questa commessa:
+${elencoAttuali}
+
+Regole:
+- Se nell'audio si dice che un'attività esistente è stata completata/fatta/finita, marcala come FATTA (usa il suo id).
+- Se si parla di qualcosa di nuovo da fare, crea una nuova attività con una descrizione SINTETICA e PROFESSIONALE (non trascrivere parola per parola: riformula in modo pulito e conciso, come una voce di to-do).
+- Se si menziona una scadenza o data per una nuova attività, includila (formato AAAA-MM-GG).
+- Ignora il parlato irrilevante (saluti, esitazioni).
+
+Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backtick, con questa struttura esatta:
+{
+  "completate": ["id1", "id2"],
+  "nuove": [
+    { "descrizione": "testo sintetico attività", "scadenza": "AAAA-MM-GG oppure stringa vuota", "note": "eventuale nota breve oppure stringa vuota" }
+  ]
+}`;
+
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${apiKey}`,
+        { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ contents:[{ parts:[{ text: promptText }, { inline_data:{ mime_type: mime, data: audioB64 } }] }] }) }
+      );
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+      let testo = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      testo = testo.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(testo);
+
+      const completate = Array.isArray(parsed.completate) ? parsed.completate : [];
+      const nuove = Array.isArray(parsed.nuove) ? parsed.nuove : [];
+
+      // Applica: segna fatte
+      for (const id of completate) {
+        await supabase.from("attivita_commessa").update({ stato:"FATTO", updated_at:new Date().toISOString() }).eq("id", id).eq("commessa_id", commessaId);
+      }
+      // Applica: aggiungi nuove
+      const nuoveInserite = [];
+      for (const n of nuove) {
+        if (!n.descrizione || !n.descrizione.trim()) continue;
+        const { data: ins } = await supabase.from("attivita_commessa").insert({
+          commessa_id: commessaId,
+          descrizione: n.descrizione.trim(),
+          stato: "DA FARE",
+          scadenza: n.scadenza || null,
+          note: n.note || null,
+          origine: "vocale",
+        }).select().single();
+        if (ins) nuoveInserite.push(ins);
+      }
+
+      await carica();
+      setRiepilogoVocale({
+        fatte: completate.length,
+        nuove: nuoveInserite.map(a => a.descrizione),
+      });
+      setRegistrazione("done");
+      setTimeout(() => setRegistrazione("idle"), 500);
+    } catch (e) {
+      setErroreVocale(e.message || "Errore durante l'elaborazione del vocale.");
+      setRegistrazione("errore");
+    }
+  };
+
+  const daFare = attivita.filter(a => a.stato !== "FATTO");
+  const fatte = attivita.filter(a => a.stato === "FATTO");
+
+  return (
+    <div>
+      <div style={{ marginBottom:8, color:"#94a3b8", fontSize:"0.9rem" }}>
+        Lista attività e note di questa commessa. Aggiorna a mano oppure con un vocale: l'AI segna come fatte le attività completate e aggiunge quelle nuove, riformulandole in modo sintetico.
+      </div>
+
+      {/* indicazione commessa attiva */}
+      <div style={{ marginBottom:18 }}>
+        {!commessaId && <div style={{ color:"#64748b", fontSize:"0.82rem", background:"#1e293b", border:"1px solid #334155", borderRadius:8, padding:"10px 14px" }}>Seleziona una commessa dal menu in alto per gestire le sue attività.</div>}
+        {commessaId && commessaSelezionata && <div style={{ color:"#7dd3fc", fontSize:"0.82rem", background:"#0c3547", border:"1px solid #1e3a5f", borderRadius:8, padding:"10px 14px" }}>📁 Commessa attiva: <strong>{commessaSelezionata.nome}</strong></div>}
+      </div>
+
+      {commessaId && (
+        <>
+          {/* registrazione vocale */}
+          <div style={{ background:"#1e293b", border:"1px solid #334155", borderRadius:12, padding:16, marginBottom:18 }}>
+            <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.82rem", marginBottom:10 }}>🎙 AGGIORNA CON UN VOCALE</div>
+            {registrazione !== "recording" ? (
+              <button onClick={avviaRegistrazione} disabled={registrazione==="elaborazione"}
+                style={{ background:"#1d4ed8", color:"#fff", border:"none", borderRadius:8, padding:"9px 18px", cursor: registrazione==="elaborazione"?"wait":"pointer", fontWeight:700, fontSize:"0.84rem", opacity: registrazione==="elaborazione"?0.6:1 }}>
+                {registrazione==="elaborazione" ? "Elaborazione in corso…" : "● Avvia registrazione"}
+              </button>
+            ) : (
+              <button onClick={fermaRegistrazione}
+                style={{ background:"#7f1d1d", color:"#fff", border:"none", borderRadius:8, padding:"9px 18px", cursor:"pointer", fontWeight:700, fontSize:"0.84rem" }}>
+                ■ Ferma e elabora
+              </button>
+            )}
+            {registrazione==="recording" && <span style={{ color:"#fca5a5", fontSize:"0.82rem", marginLeft:12 }}>🔴 Registrazione in corso… parla pure</span>}
+            {erroreVocale && <div style={{ color:"#fca5a5", fontSize:"0.8rem", marginTop:8 }}>{erroreVocale}</div>}
+            {riepilogoVocale && (
+              <div style={{ color:"#86efac", fontSize:"0.82rem", marginTop:10, background:"#14532d22", border:"1px solid #22c55e33", borderRadius:8, padding:"8px 12px" }}>
+                ✓ Aggiornamento applicato: {riepilogoVocale.fatte} attività segnate come fatte, {riepilogoVocale.nuove.length} nuove aggiunte.
+                {riepilogoVocale.nuove.length > 0 && <div style={{ marginTop:4, color:"#cbd5e1" }}>Nuove: {riepilogoVocale.nuove.join(" · ")}</div>}
+              </div>
+            )}
+          </div>
+
+          {/* aggiunta manuale */}
+          <div style={{ background:"#1e293b", border:"1px solid #334155", borderRadius:12, padding:14, marginBottom:18 }}>
+            <input value={nuova.descrizione} onChange={e=>setNuova(v=>({...v,descrizione:e.target.value}))} placeholder="Nuova attività…" style={{ ...inp, marginBottom:8 }} />
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:8 }}>
+              <div style={{ flex:1, minWidth:140 }}>
+                <label style={{ color:"#64748b", fontSize:"0.72rem", display:"block", marginBottom:2 }}>Scadenza (opzionale)</label>
+                <input type="date" value={nuova.scadenza} onChange={e=>setNuova(v=>({...v,scadenza:e.target.value}))} style={inp} />
+              </div>
+              <div style={{ flex:2, minWidth:160 }}>
+                <label style={{ color:"#64748b", fontSize:"0.72rem", display:"block", marginBottom:2 }}>Nota (opzionale)</label>
+                <input value={nuova.note} onChange={e=>setNuova(v=>({...v,note:e.target.value}))} placeholder="" style={inp} />
+              </div>
+            </div>
+            <button onClick={aggiungiManuale} disabled={salvando || !nuova.descrizione.trim()}
+              style={{ background:"#1d4ed8", color:"#fff", border:"none", borderRadius:8, padding:"7px 16px", cursor: nuova.descrizione.trim()?"pointer":"not-allowed", fontSize:"0.82rem", fontWeight:700, opacity: nuova.descrizione.trim()?1:0.5 }}>
+              {salvando ? "Aggiunta…" : "+ Aggiungi attività"}
+            </button>
+          </div>
+
+          {errore && <div style={{ color:"#fca5a5", fontSize:"0.82rem", marginBottom:10 }}>{errore}</div>}
+          {caricamento && <div style={{ color:"#7dd3fc", fontSize:"0.82rem" }}>Caricamento…</div>}
+
+          {/* da fare */}
+          <div style={{ color:"#fca5a5", fontSize:"0.78rem", fontWeight:700, letterSpacing:"0.06em", marginBottom:8 }}>DA FARE ({daFare.length})</div>
+          {daFare.length===0 && <div style={{ color:"#64748b", fontSize:"0.85rem", marginBottom:14 }}>Nessuna attività da fare.</div>}
+          {daFare.map(a => (
+            <div key={a.id} style={{ display:"flex", alignItems:"flex-start", gap:10, background:"#1e293b", border:"1px solid #334155", borderRadius:10, padding:"10px 14px", marginBottom:6 }}>
+              <button onClick={()=>toggleStato(a)} title="Segna come fatta" style={{ width:20, height:20, borderRadius:6, border:"2px solid #475569", background:"transparent", cursor:"pointer", flexShrink:0, marginTop:2 }} />
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ color:"#e2e8f0", fontSize:"0.9rem", fontWeight:600 }}>{a.descrizione}{a.origine==="vocale" && <span style={{ color:"#7dd3fc", fontSize:"0.7rem", marginLeft:6 }}>🎙</span>}</div>
+                <div style={{ display:"flex", gap:12, flexWrap:"wrap", fontSize:"0.75rem", color:"#64748b", marginTop:2 }}>
+                  {a.scadenza && <span>📅 {new Date(a.scadenza).toLocaleDateString("it-IT")}</span>}
+                  {a.note && <span>📝 {a.note}</span>}
+                </div>
+              </div>
+              <button onClick={()=>elimina(a.id)} style={{ background:"none", border:"none", color:"#64748b", cursor:"pointer", fontSize:"0.95rem" }}>✕</button>
+            </div>
+          ))}
+
+          {/* fatte */}
+          {fatte.length > 0 && (
+            <>
+              <div style={{ color:"#86efac", fontSize:"0.78rem", fontWeight:700, letterSpacing:"0.06em", margin:"16px 0 8px" }}>FATTE ({fatte.length})</div>
+              {fatte.map(a => (
+                <div key={a.id} style={{ display:"flex", alignItems:"flex-start", gap:10, background:"#0f172a", border:"1px solid #1e293b", borderRadius:10, padding:"10px 14px", marginBottom:6 }}>
+                  <button onClick={()=>toggleStato(a)} title="Riporta da fare" style={{ width:20, height:20, borderRadius:6, border:"2px solid #3b82f6", background:"#3b82f6", cursor:"pointer", flexShrink:0, marginTop:2, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                    <svg width="11" height="9" viewBox="0 0 11 9" fill="none"><path d="M1 4.5L4 7.5L10 1" stroke="white" strokeWidth="2" strokeLinecap="round"/></svg>
+                  </button>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ color:"#64748b", fontSize:"0.9rem", fontWeight:600, textDecoration:"line-through" }}>{a.descrizione}</div>
+                  </div>
+                  <button onClick={()=>elimina(a.id)} style={{ background:"none", border:"none", color:"#475569", cursor:"pointer", fontSize:"0.95rem" }}>✕</button>
+                </div>
+              ))}
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── AREA GESTIONE QUOTIDIANA — Progetti tematici e loro attività ────────────────
 const STATI_ATTIVITA = ["DA FARE", "IN CORSO", "FATTO"];
 const STATO_STYLE_ATT = {
@@ -3073,6 +3397,20 @@ function TabProgetti() {
   // form nuova attività
   const [nuovaAtt, setNuovaAtt] = useState({ descrizione:"", scadenza:"", preavviso_giorni:"", note:"" });
   const [salvandoAtt, setSalvandoAtt] = useState(false);
+
+  // vocale
+  const apiKey = getStoredApiKey();
+  const [modalitaVocale, setModalitaVocale] = useState("generale"); // generale | singolo
+  const [registrazione, setRegistrazione] = useState("idle"); // idle | recording | elaborazione | done | errore
+  const [erroreVocale, setErroreVocale] = useState("");
+  const [riepilogoVocale, setRiepilogoVocale] = useState(null);
+  const mediaRecorderRef = React.useRef(null);
+  const chunksRef = React.useRef([]);
+
+  // excel su drive
+  const [excelStato, setExcelStato] = useState("idle"); // idle | generando | done | errore
+  const [excelErrore, setExcelErrore] = useState("");
+  const [excelLink, setExcelLink] = useState(null);
 
   const inp = { background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", outline:"none", fontSize:"0.88rem", width:"100%" };
 
@@ -3177,6 +3515,200 @@ function TabProgetti() {
     }
   };
 
+  // ── EXCEL su Drive: rigenera il file fisso Gestione_Quotidiana.xlsx ──
+  // Legge progetti+attività freschi da Supabase, costruisce il workbook e lo
+  // sovrascrive nella cartella "GESTIONE QUOTIDIANA" nella root del Drive.
+  const rigeneraExcelSuDrive = async () => {
+    setExcelStato("generando");
+    setExcelErrore("");
+    try {
+      const XLSX = await loadSheetJS();
+      // dati freschi
+      const [pRes, aRes] = await Promise.all([
+        supabase.from("progetti").select("*").order("created_at", { ascending:true }),
+        supabase.from("progetto_attivita").select("*").order("created_at", { ascending:true }),
+      ]);
+      if (pRes.error) throw pRes.error;
+      if (aRes.error) throw aRes.error;
+      const prog = pRes.data || [];
+      const att = aRes.data || [];
+
+      const wb = XLSX.utils.book_new();
+      // Foglio riepilogo: tutte le attività con il progetto di appartenenza
+      const righe = [];
+      prog.forEach(p => {
+        const sue = att.filter(a => a.progetto_id === p.id);
+        if (sue.length === 0) {
+          righe.push({ Progetto: p.nome, Attività: "(nessuna attività)", Stato: "", Scadenza: "", Note: "" });
+        } else {
+          sue.forEach(a => righe.push({
+            Progetto: p.nome,
+            Attività: a.descrizione,
+            Stato: a.stato || "",
+            Scadenza: a.scadenza ? new Date(a.scadenza).toLocaleDateString("it-IT") : "",
+            Note: a.note || "",
+          }));
+        }
+      });
+      if (righe.length === 0) righe.push({ Progetto:"(nessun progetto)", Attività:"", Stato:"", Scadenza:"", Note:"" });
+      const ws = XLSX.utils.json_to_sheet(righe);
+      ws["!cols"] = [{ wch:22 }, { wch:50 }, { wch:12 }, { wch:14 }, { wch:40 }];
+      XLSX.utils.book_append_sheet(wb, ws, "Gestione Quotidiana");
+
+      // genera come blob
+      const wbArray = XLSX.write(wb, { type:"array", bookType:"xlsx" });
+      const blob = new Blob([wbArray], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+
+      // carica/sovrascrivi su Drive nella cartella fissa
+      const folderId = await trovaOCreaCartellaRoot("GESTIONE QUOTIDIANA");
+      const fileId = await upsertFileFissoSuDrive("Gestione_Quotidiana.xlsx", blob, folderId, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      setExcelLink(`https://drive.google.com/file/d/${fileId}/view`);
+      setExcelStato("done");
+      setTimeout(() => setExcelStato("idle"), 3000);
+    } catch (e) {
+      setExcelErrore(e.message || "Errore durante la generazione/salvataggio dell'Excel su Drive.");
+      setExcelStato("errore");
+    }
+  };
+
+  // ── VOCALE ──
+  const toBase64Blob = (blob) => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(",")[1]);
+    r.onerror = () => rej(new Error("Errore lettura audio"));
+    r.readAsDataURL(blob);
+  });
+
+  const avviaRegistrazione = async () => {
+    setErroreVocale(""); setRiepilogoVocale(null);
+    if (!apiKey) { setErroreVocale("Inserisci prima la API Key Gemini (es. nel tab Documenti o Analisi AI)."); setRegistrazione("errore"); return; }
+    if (modalitaVocale === "singolo" && !progettoSelezionato) { setErroreVocale("Seleziona un progetto a sinistra per la modalità su singolo progetto."); setRegistrazione("errore"); return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : (MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "");
+      const recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      chunksRef.current = [];
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setRegistrazione("recording");
+    } catch (e) {
+      setErroreVocale("Impossibile accedere al microfono: " + (e.message || "permesso negato.")); setRegistrazione("errore");
+    }
+  };
+
+  const fermaRegistrazione = () => {
+    if (!mediaRecorderRef.current) return;
+    const recorder = mediaRecorderRef.current;
+    recorder.onstop = async () => {
+      recorder.stream.getTracks().forEach(t => t.stop());
+      const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
+      await elaboraVocale(blob);
+    };
+    recorder.stop();
+    setRegistrazione("elaborazione");
+  };
+
+  const elaboraVocale = async (blob) => {
+    try {
+      const audioB64 = await toBase64Blob(blob);
+      const mime = blob.type || "audio/webm";
+
+      // Contesto: progetti esistenti e relative attività (per id)
+      const contesto = progetti.map(p => {
+        const sue = attivita.filter(a => a.progetto_id === p.id);
+        const elenco = sue.map(a => `    - (id:${a.id}) [${a.stato}] ${a.descrizione}`).join("\n") || "    (nessuna attività)";
+        return `Progetto "${p.nome}" (id:${p.id}):\n${elenco}`;
+      }).join("\n");
+
+      const vincoloModalita = modalitaVocale === "singolo" && progettoSelezionato
+        ? `\nIMPORTANTE: l'utente sta parlando SOLO del progetto con id "${progettoSelezionato}". Assegna tutte le nuove attività e gli aggiornamenti a quel progetto, non ad altri.`
+        : `\nL'utente può parlare di più progetti diversi nello stesso audio: assegna ogni cosa al progetto giusto in base a ciò che dice. Se nomina un progetto che non esiste tra quelli elencati, crealo.`;
+
+      const promptText = `Sei un assistente che gestisce le attività di gestione quotidiana di un project manager tecnico, organizzate per progetto/tema (es. Cloud, Telefonia, Sicurezza, Chiusure PV, Spagna, UPIM). Ascolta l'audio in italiano e aggiorna progetti e attività.
+
+PROGETTI E ATTIVITÀ ATTUALI:
+${contesto || "(nessun progetto ancora)"}
+${vincoloModalita}
+
+Regole:
+- Se si dice che un'attività esistente è stata completata/fatta/finita, marcala come FATTA (usa il suo id).
+- Se si parla di qualcosa di nuovo da fare, crea una nuova attività con descrizione SINTETICA e PROFESSIONALE (non trascrivere parola per parola: riformula in modo pulito e conciso).
+- Assegna ogni nuova attività al progetto giusto (per nome). Se il progetto non esiste, indicane il nome in "nuovo_progetto".
+- Se viene menzionata una scadenza, includila in formato AAAA-MM-GG.
+- Ignora il parlato irrilevante.
+
+Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backtick:
+{
+  "completate": ["idAttività1", "idAttività2"],
+  "nuove": [
+    { "progetto_id": "id del progetto esistente, oppure stringa vuota se nuovo", "nuovo_progetto": "nome nuovo progetto se non esiste, altrimenti stringa vuota", "descrizione": "testo sintetico", "scadenza": "AAAA-MM-GG o vuoto", "note": "nota breve o vuoto" }
+  ]
+}`;
+
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${apiKey}`,
+        { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ contents:[{ parts:[{ text: promptText }, { inline_data:{ mime_type: mime, data: audioB64 } }] }] }) }
+      );
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+      let testo = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      testo = testo.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(testo);
+
+      const completate = Array.isArray(parsed.completate) ? parsed.completate : [];
+      const nuove = Array.isArray(parsed.nuove) ? parsed.nuove : [];
+
+      // applica completate
+      for (const id of completate) {
+        await supabase.from("progetto_attivita").update({ stato:"FATTO", updated_at:new Date().toISOString() }).eq("id", id);
+      }
+
+      // mappa nome->progetto per creare al volo i progetti nuovi
+      let progettiCorrenti = [...progetti];
+      const trovaOCreaProgettoPerNome = async (nome) => {
+        const esiste = progettiCorrenti.find(p => p.nome.toLowerCase() === nome.toLowerCase());
+        if (esiste) return esiste.id;
+        const colore = COLORI_PROGETTO[progettiCorrenti.length % COLORI_PROGETTO.length];
+        const { data: nuovoP } = await supabase.from("progetti").insert({ nome, colore }).select().single();
+        if (nuovoP) { progettiCorrenti.push(nuovoP); return nuovoP.id; }
+        return null;
+      };
+
+      let contNuove = 0;
+      const nomiNuoviProgetti = new Set();
+      for (const n of nuove) {
+        if (!n.descrizione || !n.descrizione.trim()) continue;
+        let pid = n.progetto_id || null;
+        if ((!pid || !progettiCorrenti.find(p => p.id === pid)) && n.nuovo_progetto && n.nuovo_progetto.trim()) {
+          pid = await trovaOCreaProgettoPerNome(n.nuovo_progetto.trim());
+          nomiNuoviProgetti.add(n.nuovo_progetto.trim());
+        }
+        if (!pid && modalitaVocale === "singolo" && progettoSelezionato) pid = progettoSelezionato;
+        if (!pid) continue; // senza progetto non si può inserire
+        await supabase.from("progetto_attivita").insert({
+          progetto_id: pid,
+          descrizione: n.descrizione.trim(),
+          stato: "DA FARE",
+          scadenza: n.scadenza || null,
+          note: n.note || null,
+        });
+        contNuove++;
+      }
+
+      await carica();
+      setRiepilogoVocale({ fatte: completate.length, nuove: contNuove, nuoviProgetti: Array.from(nomiNuoviProgetti) });
+      setRegistrazione("done");
+      setTimeout(() => setRegistrazione("idle"), 500);
+
+      // rigenera l'Excel fisso su Drive con i dati aggiornati
+      rigeneraExcelSuDrive();
+    } catch (e) {
+      setErroreVocale(e.message || "Errore durante l'elaborazione del vocale.");
+      setRegistrazione("errore");
+    }
+  };
+
   const progettoCorrente = progetti.find(p => p.id === progettoSelezionato);
   const attivitaProgetto = attivita.filter(a => a.progetto_id === progettoSelezionato);
   const contaAttivita = (pid) => attivita.filter(a => a.progetto_id === pid).length;
@@ -3190,6 +3722,52 @@ function TabProgetti() {
         Organizza le attività di gestione quotidiana per progetto/tema (Cloud, Telefonia, Sicurezza, Chiusure PV, Spagna, UPIM…).
       </div>
       {errore && <div style={{ color:"#fca5a5", fontSize:"0.82rem", marginBottom:12, background:"#450a0a22", border:"1px solid #ef444433", borderRadius:8, padding:"8px 12px" }}>{errore}</div>}
+
+      {/* blocco vocale + excel */}
+      <div style={{ background:"#1e293b", border:"1px solid #334155", borderRadius:12, padding:16, marginBottom:18 }}>
+        <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.82rem", marginBottom:10 }}>🎙 AGGIORNA CON UN VOCALE</div>
+        <div style={{ display:"flex", gap:8, marginBottom:12, flexWrap:"wrap" }}>
+          <button onClick={()=>setModalitaVocale("generale")}
+            style={{ flex:1, minWidth:180, background: modalitaVocale==="generale"?"#3b82f6":"#0f172a", color: modalitaVocale==="generale"?"#fff":"#94a3b8", border:`1px solid ${modalitaVocale==="generale"?"#3b82f6":"#334155"}`, borderRadius:8, padding:"8px 12px", cursor:"pointer", fontSize:"0.82rem", fontWeight:700 }}>
+            🗂 Vocale generale (più progetti)
+          </button>
+          <button onClick={()=>setModalitaVocale("singolo")}
+            style={{ flex:1, minWidth:180, background: modalitaVocale==="singolo"?"#3b82f6":"#0f172a", color: modalitaVocale==="singolo"?"#fff":"#94a3b8", border:`1px solid ${modalitaVocale==="singolo"?"#3b82f6":"#334155"}`, borderRadius:8, padding:"8px 12px", cursor:"pointer", fontSize:"0.82rem", fontWeight:700 }}>
+            🎯 Vocale sul progetto selezionato
+          </button>
+        </div>
+        {modalitaVocale==="singolo" && !progettoSelezionato && <div style={{ color:"#fbbf24", fontSize:"0.78rem", marginBottom:8 }}>Seleziona un progetto a sinistra per usare questa modalità.</div>}
+        {registrazione !== "recording" ? (
+          <button onClick={avviaRegistrazione} disabled={registrazione==="elaborazione"}
+            style={{ background:"#1d4ed8", color:"#fff", border:"none", borderRadius:8, padding:"9px 18px", cursor: registrazione==="elaborazione"?"wait":"pointer", fontWeight:700, fontSize:"0.84rem", opacity: registrazione==="elaborazione"?0.6:1 }}>
+            {registrazione==="elaborazione" ? "Elaborazione in corso…" : "● Avvia registrazione"}
+          </button>
+        ) : (
+          <button onClick={fermaRegistrazione}
+            style={{ background:"#7f1d1d", color:"#fff", border:"none", borderRadius:8, padding:"9px 18px", cursor:"pointer", fontWeight:700, fontSize:"0.84rem" }}>
+            ■ Ferma e elabora
+          </button>
+        )}
+        {registrazione==="recording" && <span style={{ color:"#fca5a5", fontSize:"0.82rem", marginLeft:12 }}>🔴 Registrazione in corso… parla pure</span>}
+        {erroreVocale && <div style={{ color:"#fca5a5", fontSize:"0.8rem", marginTop:8 }}>{erroreVocale}</div>}
+        {riepilogoVocale && (
+          <div style={{ color:"#86efac", fontSize:"0.82rem", marginTop:10, background:"#14532d22", border:"1px solid #22c55e33", borderRadius:8, padding:"8px 12px" }}>
+            ✓ {riepilogoVocale.fatte} attività segnate come fatte, {riepilogoVocale.nuove} nuove aggiunte{riepilogoVocale.nuoviProgetti?.length>0 ? `, nuovi progetti: ${riepilogoVocale.nuoviProgetti.join(", ")}` : ""}.
+          </div>
+        )}
+
+        {/* excel su drive */}
+        <div style={{ marginTop:14, paddingTop:12, borderTop:"1px solid #334155", display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+          <button onClick={rigeneraExcelSuDrive} disabled={excelStato==="generando"}
+            style={{ background:"#0f172a", color:"#7dd3fc", border:"1px solid #334155", borderRadius:8, padding:"7px 14px", cursor: excelStato==="generando"?"wait":"pointer", fontSize:"0.8rem", fontWeight:700 }}>
+            {excelStato==="generando" ? "Aggiornamento Excel…" : "📊 Aggiorna Excel su Drive"}
+          </button>
+          {excelStato==="done" && <span style={{ color:"#86efac", fontSize:"0.8rem" }}>✓ Salvato su Drive (cartella GESTIONE QUOTIDIANA)</span>}
+          {excelLink && <a href={excelLink} target="_blank" rel="noreferrer" style={{ color:"#7dd3fc", fontSize:"0.8rem" }}>Apri il file ↗</a>}
+          {excelStato==="errore" && <span style={{ color:"#fca5a5", fontSize:"0.8rem" }}>{excelErrore}</span>}
+        </div>
+        <div style={{ color:"#475569", fontSize:"0.72rem", marginTop:8 }}>Dopo ogni vocale l'Excel "Gestione_Quotidiana.xlsx" viene riscritto automaticamente nella cartella GESTIONE QUOTIDIANA su Drive.</div>
+      </div>
 
       <div style={{ display:"grid", gridTemplateColumns:"260px 1fr", gap:18 }}>
         {/* colonna progetti */}
@@ -3466,6 +4044,7 @@ const TABS_APERTURE = [
   { id:"workflow", label:"✅ Workflow" },
   { id:"pratiche", label:"📂 Pratiche Amm." },
   { id:"budget",   label:"💶 Budget HP INV" },
+  { id:"attivita", label:"🗒 Attività" },
   { id:"crono",    label:"📅 Cronoprogramma" },
   { id:"vocale",   label:"🎙 Vocale" },
   { id:"ai",       label:"🤖 Analisi AI" },
@@ -3633,6 +4212,7 @@ export default function App() {
         {tab==="pratiche" && <TabPratiche commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="budget"   && <TabBudget commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="crono"    && <TabCronoprogramma commessaIdGlobale={commessaIdGlobale} commessaSelezionata={commessaSelezionataGlobale} />}
+        {tab==="attivita" && <TabAttivitaCommessa commessaIdGlobale={commessaIdGlobale} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="ai"       && <TabAnalisiAI />}
         {tab==="pdf"      && <TabEditorPDF />}
         {tab==="vocale"   && <TabVocale commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
