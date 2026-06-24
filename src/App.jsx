@@ -181,10 +181,28 @@ const creaCartellaDrive = async (nome, parentId = null) => {
   return data.id;
 };
 
+// Trova (o crea, se non esiste) una cartella nella radice del Drive per nome.
+// Usata per le macro-cartelle APERTURE / RISTRUTTURAZIONI che contengono le
+// rispettive commesse. Cerca solo tra le cartelle nella root ("My Drive").
+const trovaOCreaCartellaRoot = async (nome) => {
+  const query = encodeURIComponent(`name = '${nome.replace(/'/g, "\\'")}' and 'root' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
+  const res = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  if (data.files && data.files.length > 0) return data.files[0].id;
+  return await creaCartellaDrive(nome); // creata nella root
+};
+
+// Nome della macro-cartella in base al tipo di commessa
+const macroCartellaPerTipo = (tipo) => (tipo === "ristrutturazione" ? "RISTRUTTURAZIONI" : "APERTURE");
+
 // Crea la cartella della commessa con dentro tutte le sottocartelle annidate
-// definite in SOTTOCARTELLE_COMMESSA. Ritorna l'id della cartella radice.
-const creaStrutturaCommessaSuDrive = async (nomeCommessa) => {
-  const rootId = await creaCartellaDrive(nomeCommessa);
+// definite in SOTTOCARTELLE_COMMESSA. La commessa viene creata dentro la
+// macro-cartella APERTURE o RISTRUTTURAZIONI in base al tipo. Ritorna l'id
+// della cartella radice della commessa.
+const creaStrutturaCommessaSuDrive = async (nomeCommessa, tipo = "apertura") => {
+  const macroId = await trovaOCreaCartellaRoot(macroCartellaPerTipo(tipo));
+  const rootId = await creaCartellaDrive(nomeCommessa, macroId);
   const cache = { "": rootId }; // path -> id, "" = radice
 
   for (const percorso of SOTTOCARTELLE_COMMESSA) {
@@ -200,6 +218,26 @@ const creaStrutturaCommessaSuDrive = async (nomeCommessa) => {
     }
   }
   return { rootId, mappaCartelle: cache };
+};
+
+// Sposta una cartella commessa già esistente dentro la macro-cartella giusta
+// (APERTURE/RISTRUTTURAZIONI) in base al tipo. Rimuove i parent precedenti e
+// aggiunge il nuovo. Ritorna l'id della macro-cartella di destinazione.
+const spostaCommessaInMacroCartella = async (driveFolderId, tipo) => {
+  const macroId = await trovaOCreaCartellaRoot(macroCartellaPerTipo(tipo));
+  // Recupera i parent attuali della cartella commessa
+  const infoRes = await driveFetch(`https://www.googleapis.com/drive/v3/files/${driveFolderId}?fields=parents`);
+  const info = await infoRes.json();
+  if (info.error) throw new Error(info.error.message);
+  const vecchiParent = (info.parents || []).join(",");
+  // Se è già dentro la macro-cartella giusta, non fa nulla
+  if (info.parents && info.parents.length === 1 && info.parents[0] === macroId) return macroId;
+  const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${driveFolderId}?addParents=${macroId}${vecchiParent ? `&removeParents=${vecchiParent}` : ""}&fields=id,parents`, {
+    method: "PATCH",
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  return macroId;
 };
 
 // Carica un file in una cartella Drive specifica (upload multipart semplice)
@@ -1266,6 +1304,8 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
   const [confermaElimina, setConfermaElimina] = useState(false); // primo click arma la conferma
   const [eliminazioneStato, setEliminazioneStato] = useState("idle"); // idle | eliminando | errore
   const [erroreEliminazione, setErroreEliminazione] = useState("");
+  const [spostaStato, setSpostaStato] = useState("idle"); // idle | spostando | done | error
+  const [erroreSposta, setErroreSposta] = useState("");
 
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
   const inpStyle = { background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"8px 12px", width:"100%", outline:"none", fontSize:"0.9rem" };
@@ -1332,7 +1372,7 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
     setDriveStato("creating");
     setErroreDrive("");
     try {
-      const { rootId } = await creaStrutturaCommessaSuDrive(form.nome);
+      const { rootId } = await creaStrutturaCommessaSuDrive(form.nome, form.tipo || "apertura");
       const { error } = await supabase.from("commesse").update({ drive_folder_id: rootId }).eq("id", form.id);
       if (error) throw error;
       setForm(f => ({ ...f, drive_folder_id: rootId }));
@@ -1341,6 +1381,22 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
     } catch (e) {
       setErroreDrive(e.message || "Errore durante la creazione su Drive.");
       setDriveStato("error");
+    }
+  };
+
+  // Sposta una commessa già esistente (con cartella Drive) dentro la macro-cartella
+  // APERTURE o RISTRUTTURAZIONI corretta in base al tipo selezionato.
+  const spostaInMacroCartella = async () => {
+    if (!form.drive_folder_id) return;
+    setSpostaStato("spostando");
+    setErroreSposta("");
+    try {
+      await spostaCommessaInMacroCartella(form.drive_folder_id, form.tipo || "apertura");
+      setSpostaStato("done");
+      setTimeout(() => setSpostaStato("idle"), 3000);
+    } catch (e) {
+      setErroreSposta(e.message || "Errore durante lo spostamento su Drive.");
+      setSpostaStato("error");
     }
   };
 
@@ -1486,9 +1542,20 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
         <div style={{ background:"#0f172a", border:"1px solid #1e3a5f", borderRadius:12, padding:18, marginBottom:20 }}>
           <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.92rem", marginBottom:8 }}>📁 Archivio Google Drive</div>
           {form.drive_folder_id ? (
-            <div style={{ color:"#86efac", fontSize:"0.82rem" }}>
-              ✓ Cartella creata su Drive con tutte le sottocartelle pronte.{" "}
-              <a href={`https://drive.google.com/drive/folders/${form.drive_folder_id}`} target="_blank" rel="noreferrer" style={{ color:"#7dd3fc" }}>Apri su Drive →</a>
+            <div>
+              <div style={{ color:"#86efac", fontSize:"0.82rem", marginBottom:10 }}>
+                ✓ Cartella creata su Drive con tutte le sottocartelle pronte.{" "}
+                <a href={`https://drive.google.com/drive/folders/${form.drive_folder_id}`} target="_blank" rel="noreferrer" style={{ color:"#7dd3fc" }}>Apri su Drive →</a>
+              </div>
+              <div style={{ color:"#64748b", fontSize:"0.78rem", marginBottom:8 }}>
+                Sposta questa commessa nella macro-cartella <strong>{form.tipo==="ristrutturazione"?"RISTRUTTURAZIONI":"APERTURE"}</strong> su Drive (utile per le commesse create prima delle macro-cartelle, o se hai cambiato il tipo).
+              </div>
+              <button onClick={spostaInMacroCartella} disabled={spostaStato==="spostando"}
+                style={{ background:"#1e293b", color:"#7dd3fc", border:"1px solid #334155", borderRadius:8, padding:"7px 14px", cursor:"pointer", fontWeight:700, fontSize:"0.8rem", opacity: spostaStato==="spostando"?0.6:1 }}>
+                {spostaStato==="spostando" ? "Spostamento…" : `📂 Sposta in ${form.tipo==="ristrutturazione"?"RISTRUTTURAZIONI":"APERTURE"}`}
+              </button>
+              {spostaStato==="done" && <span style={{ color:"#86efac", fontSize:"0.8rem", marginLeft:10 }}>✓ Spostata</span>}
+              {spostaStato==="error" && <div style={{ color:"#fca5a5", fontSize:"0.78rem", marginTop:8 }}>{erroreSposta}</div>}
             </div>
           ) : (
             <>
