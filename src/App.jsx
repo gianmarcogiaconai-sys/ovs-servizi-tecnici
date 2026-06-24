@@ -828,7 +828,10 @@ const estraiValoriBudgetDaFile = async (file) => {
   return { valori, trovate, nonTrovate };
 };
 
-const valoriVuoti = () => Object.fromEntries(BUDGET_VOCI.map(v=>v.n).map(n=>[n, { std:0, extra:0 }]));
+const valoriVuoti = () => Object.fromEntries(BUDGET_VOCI.map(v=>v.n).map(n=>[n, { std:0, extra:0, sal:[] }]));
+
+// Somma degli importi SAL registrati per una voce (il "fatturato/avanzato")
+const sommaSal = (voce) => (voce?.sal || []).reduce((a, s) => a + (Number(s?.importo) || 0), 0);
 
 function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
   const commessaId = commessaIdGlobale || "";
@@ -848,11 +851,36 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
 
   const setVal = (n, campo, v) => setValori(prev=>({ ...prev, [n]:{ ...prev[n], [campo]: Number(v)||0 } }));
 
+  // Gestione SAL (stati avanzamento) multipli per voce
+  const [salVoceAperta, setSalVoceAperta] = useState(null); // numero voce con pannello SAL aperto
+  const [nuovoSal, setNuovoSal] = useState({ importo:"", data:"", nota:"" });
+
+  const aggiungiSal = (n) => {
+    const importo = Number(nuovoSal.importo) || 0;
+    if (importo <= 0) return;
+    setValori(prev => {
+      const voce = prev[n] || { std:0, extra:0, sal:[] };
+      const sal = [...(voce.sal || []), { importo, data: nuovoSal.data || new Date().toISOString().slice(0,10), nota: nuovoSal.nota || "" }];
+      return { ...prev, [n]: { ...voce, sal } };
+    });
+    setNuovoSal({ importo:"", data:"", nota:"" });
+  };
+
+  const rimuoviSal = (n, idx) => {
+    setValori(prev => {
+      const voce = prev[n] || { std:0, extra:0, sal:[] };
+      const sal = (voce.sal || []).filter((_, i) => i !== idx);
+      return { ...prev, [n]: { ...voce, sal } };
+    });
+  };
+
   const cats = [...new Set(BUDGET_VOCI.map(v=>v.categoria))];
 
   const totale = BUDGET_VOCI.reduce((acc,v)=>acc + (valori[v.n]?.std||0) + (valori[v.n]?.extra||0), 0);
   const totaleStd = BUDGET_VOCI.reduce((acc,v)=>acc + (valori[v.n]?.std||0), 0);
   const totaleExtra = BUDGET_VOCI.reduce((acc,v)=>acc + (valori[v.n]?.extra||0), 0);
+  const totaleFatturato = BUDGET_VOCI.reduce((acc,v)=>acc + sommaSal(valori[v.n]), 0);
+  const totaleSospeso = totale - totaleFatturato;
 
   const inputStyle = { background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:6, padding:"5px 8px", width:110, textAlign:"right", fontSize:"0.82rem", outline:"none" };
 
@@ -874,7 +902,15 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
         const { data, error } = await supabase.from("budget_hp_inv").select("*").eq("commessa_id", commessaId).maybeSingle();
         if (error) throw error;
         if (data) {
-          setValori({ ...valoriVuoti(), ...(data.valori || {}) });
+          // Normalizza: ogni voce deve avere un array sal (le versioni vecchie
+          // salvate prima dei SAL hanno solo std/extra).
+          const base = valoriVuoti();
+          const caricati = data.valori || {};
+          const uniti = { ...base };
+          Object.keys(caricati).forEach(n => {
+            uniti[n] = { std:0, extra:0, ...caricati[n], sal: caricati[n].sal || [] };
+          });
+          setValori(uniti);
           setMqVendita(data.mq_vendita || 0);
           setUltimoAggiornamento({ updated_at: data.updated_at, nome_file_origine: data.nome_file_origine });
         } else {
@@ -949,7 +985,13 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
     setImportRiepilogo(null);
     try {
       const { valori: nuoviValori, trovate, nonTrovate } = await estraiValoriBudgetDaFile(file);
-      const valoriUniti = { ...valori, ...nuoviValori };
+      // Unisce i nuovi valori std/extra importati, ma preserva i SAL già
+      // registrati per ciascuna voce (l'import aggiorna gli importi previsti,
+      // non deve cancellare gli stati avanzamento inseriti a mano).
+      const valoriUniti = { ...valori };
+      Object.keys(nuoviValori).forEach(n => {
+        valoriUniti[n] = { ...nuoviValori[n], sal: valori[n]?.sal || [] };
+      });
       setValori(valoriUniti);
       const { error } = await supabase.from("budget_hp_inv").upsert({
         commessa_id: commessaId,
@@ -1061,6 +1103,14 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
           <div style={{ color:"#fff", fontWeight:700, fontSize:"1.2rem" }}>{fmtEur(totale)}</div>
           {mqVendita>0 && <div style={{ color:"#94a3b8", fontSize:"0.75rem" }}>{fmtEur(Math.round(totale/mqVendita))}/mq</div>}
         </div>
+        <div style={{ background:"#1e293b", border:"1px solid #92400e", borderRadius:10, padding:"12px 18px", flex:1, minWidth:160 }}>
+          <div style={{ color:"#fbbf24", fontSize:"0.75rem", marginBottom:4 }}>FATTURATO (SAL)</div>
+          <div style={{ color:"#fbbf24", fontWeight:700, fontSize:"1.2rem" }}>{fmtEur(totaleFatturato)}</div>
+        </div>
+        <div style={{ background:"#1e293b", border:`1px solid ${totaleSospeso>0?"#7f1d1d":"#14532d"}`, borderRadius:10, padding:"12px 18px", flex:1, minWidth:160 }}>
+          <div style={{ color: totaleSospeso>0?"#fca5a5":"#86efac", fontSize:"0.75rem", marginBottom:4 }}>SOSPESO (RESIDUO)</div>
+          <div style={{ color: totaleSospeso>0?"#fca5a5":"#86efac", fontWeight:700, fontSize:"1.2rem" }}>{fmtEur(totaleSospeso)}</div>
+        </div>
       </div>
 
 
@@ -1075,6 +1125,8 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
               <th style={{ textAlign:"right", padding:"8px 10px", borderBottom:"1px solid #334155" }}>STANDARD (€)</th>
               <th style={{ textAlign:"right", padding:"8px 10px", borderBottom:"1px solid #334155" }}>EXTRA (€)</th>
               <th style={{ textAlign:"right", padding:"8px 10px", borderBottom:"1px solid #334155" }}>TOTALE (€)</th>
+              <th style={{ textAlign:"right", padding:"8px 10px", borderBottom:"1px solid #334155" }}>SAL FATTURATO (€)</th>
+              <th style={{ textAlign:"right", padding:"8px 10px", borderBottom:"1px solid #334155" }}>SOSPESO (€)</th>
               {mqVendita>0 && <th style={{ textAlign:"right", padding:"8px 10px", borderBottom:"1px solid #334155" }}>€/mq</th>}
             </tr>
           </thead>
@@ -1084,13 +1136,21 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
               const subStd = voci.reduce((a,v)=>a+(valori[v.n]?.std||0),0);
               const subExtra = voci.reduce((a,v)=>a+(valori[v.n]?.extra||0),0);
               const subTot = subStd + subExtra;
+              const subFatt = voci.reduce((a,v)=>a+sommaSal(valori[v.n]),0);
+              const subSosp = subTot - subFatt;
               return [
                 <tr key={"cat-"+cat}>
-                  <td colSpan={mqVendita>0?7:6} style={{ padding:"10px 10px 4px", color:"#7dd3fc", fontWeight:700, fontSize:"0.78rem", letterSpacing:"0.06em", borderTop:"1px solid #1e3a5f" }}>{cat}</td>
+                  <td colSpan={mqVendita>0?9:8} style={{ padding:"10px 10px 4px", color:"#7dd3fc", fontWeight:700, fontSize:"0.78rem", letterSpacing:"0.06em", borderTop:"1px solid #1e3a5f" }}>{cat}</td>
                 </tr>,
-                ...voci.map(v=>{
-                  const tot=(valori[v.n]?.std||0)+(valori[v.n]?.extra||0);
-                  return (
+                ...voci.flatMap(v=>{
+                  const std = valori[v.n]?.std||0;
+                  const extra = valori[v.n]?.extra||0;
+                  const tot = std + extra;
+                  const fatt = sommaSal(valori[v.n]);
+                  const sosp = tot - fatt;
+                  const salList = valori[v.n]?.sal || [];
+                  const aperta = salVoceAperta === v.n;
+                  const righe = [
                     <tr key={v.n} style={{ borderBottom:"1px solid #0f172a" }}>
                       <td style={{ padding:"6px 10px", color:"#475569" }}>{v.n}</td>
                       <td style={{ padding:"6px 10px", color:"#cbd5e1" }}>{v.voce}</td>
@@ -1104,17 +1164,68 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
                       <td style={{ padding:"6px 10px", textAlign:"right", color: tot>0?"#86efac":"#475569", fontWeight:tot>0?700:400 }}>
                         {tot>0?fmtEur(tot):"—"}
                       </td>
+                      <td style={{ padding:"6px 10px", textAlign:"right" }}>
+                        <button onClick={()=> setSalVoceAperta(aperta?null:v.n)}
+                          style={{ background: aperta?"#1e3a5f":"transparent", color: fatt>0?"#fbbf24":"#64748b", border:`1px solid ${aperta?"#3b82f6":"#334155"}`, borderRadius:6, padding:"4px 10px", cursor:"pointer", fontSize:"0.8rem", fontWeight: fatt>0?700:400, minWidth:90, textAlign:"right" }}>
+                          {fatt>0?fmtEur(fatt):"+ SAL"}{salList.length>0?` (${salList.length})`:""}
+                        </button>
+                      </td>
+                      <td style={{ padding:"6px 10px", textAlign:"right", color: sosp>0?"#fca5a5":(tot>0?"#86efac":"#475569"), fontWeight: tot>0?700:400 }}>
+                        {tot>0?fmtEur(sosp):"—"}
+                      </td>
                       {mqVendita>0 && <td style={{ padding:"6px 10px", textAlign:"right", color:"#64748b" }}>
                         {tot>0?fmtEur(Math.round(tot/mqVendita)):"—"}
                       </td>}
                     </tr>
-                  );
+                  ];
+                  if (aperta) {
+                    righe.push(
+                      <tr key={v.n+"-sal"} style={{ background:"#0c1424" }}>
+                        <td colSpan={mqVendita>0?9:8} style={{ padding:"10px 16px" }}>
+                          <div style={{ color:"#7dd3fc", fontSize:"0.78rem", fontWeight:700, marginBottom:8 }}>Stati avanzamento — {v.voce}</div>
+                          {salList.length===0 && <div style={{ color:"#64748b", fontSize:"0.8rem", marginBottom:8 }}>Nessun SAL registrato. Aggiungi il primo importo fatturato qui sotto.</div>}
+                          {salList.map((s,idx)=>(
+                            <div key={idx} style={{ display:"flex", alignItems:"center", gap:10, marginBottom:5, fontSize:"0.82rem" }}>
+                              <span style={{ color:"#94a3b8", minWidth:60 }}>SAL {idx+1}</span>
+                              <span style={{ color:"#fbbf24", fontWeight:700, minWidth:90, textAlign:"right" }}>{fmtEur(Number(s.importo)||0)}</span>
+                              <span style={{ color:"#64748b" }}>{s.data ? new Date(s.data).toLocaleDateString("it-IT") : ""}</span>
+                              {s.nota && <span style={{ color:"#64748b" }}>— {s.nota}</span>}
+                              <button onClick={()=>rimuoviSal(v.n,idx)} style={{ marginLeft:"auto", background:"none", border:"none", color:"#64748b", cursor:"pointer", fontSize:"0.95rem" }}>✕</button>
+                            </div>
+                          ))}
+                          <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"flex-end", marginTop:10, paddingTop:10, borderTop:"1px solid #1e293b" }}>
+                            <div>
+                              <label style={{ color:"#64748b", fontSize:"0.7rem", display:"block", marginBottom:2 }}>Importo SAL (€)</label>
+                              <input type="number" value={nuovoSal.importo} onChange={e=>setNuovoSal(v2=>({...v2,importo:e.target.value}))} placeholder="0" style={{ ...inputStyle, width:110 }} />
+                            </div>
+                            <div>
+                              <label style={{ color:"#64748b", fontSize:"0.7rem", display:"block", marginBottom:2 }}>Data</label>
+                              <input type="date" value={nuovoSal.data} onChange={e=>setNuovoSal(v2=>({...v2,data:e.target.value}))} style={{ ...inputStyle, width:140, textAlign:"left" }} />
+                            </div>
+                            <div style={{ flex:1, minWidth:120 }}>
+                              <label style={{ color:"#64748b", fontSize:"0.7rem", display:"block", marginBottom:2 }}>Nota (opz.)</label>
+                              <input type="text" value={nuovoSal.nota} onChange={e=>setNuovoSal(v2=>({...v2,nota:e.target.value}))} placeholder="es. fattura n. 12" style={{ ...inputStyle, width:"100%", textAlign:"left" }} />
+                            </div>
+                            <button onClick={()=>aggiungiSal(v.n)} style={{ background:"#1d4ed8", color:"#fff", border:"none", borderRadius:6, padding:"7px 14px", cursor:"pointer", fontSize:"0.8rem", fontWeight:700 }}>+ Aggiungi</button>
+                          </div>
+                          <div style={{ marginTop:10, display:"flex", gap:20, fontSize:"0.82rem" }}>
+                            <span style={{ color:"#94a3b8" }}>Previsto: <strong style={{ color:"#86efac" }}>{fmtEur(tot)}</strong></span>
+                            <span style={{ color:"#94a3b8" }}>Fatturato: <strong style={{ color:"#fbbf24" }}>{fmtEur(fatt)}</strong></span>
+                            <span style={{ color:"#94a3b8" }}>Sospeso: <strong style={{ color: sosp>0?"#fca5a5":"#86efac" }}>{fmtEur(sosp)}</strong></span>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  }
+                  return righe;
                 }),
                 <tr key={"sub-"+cat} style={{ background:"#0f172a" }}>
                   <td colSpan={3} style={{ padding:"6px 10px", color:"#475569", fontSize:"0.78rem" }}>subtotale {cat}</td>
                   <td style={{ padding:"6px 10px", textAlign:"right", color:"#86efac", fontWeight:700 }}>{fmtEur(subStd)||"—"}</td>
                   <td style={{ padding:"6px 10px", textAlign:"right", color:"#fbbf24", fontWeight:700 }}>{fmtEur(subExtra)||"—"}</td>
                   <td style={{ padding:"6px 10px", textAlign:"right", color:"#e2e8f0", fontWeight:700 }}>{fmtEur(subTot)||"—"}</td>
+                  <td style={{ padding:"6px 10px", textAlign:"right", color:"#fbbf24", fontWeight:700 }}>{subFatt>0?fmtEur(subFatt):"—"}</td>
+                  <td style={{ padding:"6px 10px", textAlign:"right", color: subSosp>0?"#fca5a5":"#86efac", fontWeight:700 }}>{subTot>0?fmtEur(subSosp):"—"}</td>
                   {mqVendita>0 && <td style={{ padding:"6px 10px", textAlign:"right", color:"#64748b" }}>{subTot>0?fmtEur(Math.round(subTot/mqVendita)):"—"}</td>}
                 </tr>
               ];
@@ -2123,9 +2234,21 @@ function TabDocumenti({ commessaIdGlobale, commesse, commessaSelezionata }) {
     setItems(prev => prev.map(i => i.id === item.id ? { ...i, budgetStato: "estrazione" } : i));
     try {
       const { valori, trovate, nonTrovate } = await estraiValoriBudgetDaFile(item.file);
+      // Recupera i SAL già registrati per questa commessa, per non perderli
+      // quando si ricarica un'ipotesi di investimento dal tab Documenti.
+      let valoriDaSalvare = valori;
+      try {
+        const { data: esistente } = await supabase.from("budget_hp_inv").select("valori").eq("commessa_id", commessaSelezionata.id).maybeSingle();
+        if (esistente?.valori) {
+          valoriDaSalvare = { ...valori };
+          Object.keys(valori).forEach(n => {
+            valoriDaSalvare[n] = { ...valori[n], sal: esistente.valori[n]?.sal || [] };
+          });
+        }
+      } catch (_) { /* se non esiste riga precedente, si procede con i soli nuovi valori */ }
       const { error } = await supabase.from("budget_hp_inv").upsert({
         commessa_id: commessaSelezionata.id,
-        valori,
+        valori: valoriDaSalvare,
         nome_file_origine: item.file.name,
         updated_at: new Date().toISOString(),
       }, { onConflict: "commessa_id" });
