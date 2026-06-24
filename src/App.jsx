@@ -884,6 +884,13 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
 
   const inputStyle = { background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:6, padding:"5px 8px", width:110, textAlign:"right", fontSize:"0.82rem", outline:"none" };
 
+  // Stili per le prime due colonne (N. e VOCE) che restano fisse mentre si
+  // scorre orizzontalmente verso le colonne SAL/Sospeso. Servono position
+  // sticky + un background opaco per coprire il contenuto che scorre sotto.
+  const COL_N_W = 44;   // larghezza colonna N.
+  const stickyN = (bg) => ({ position:"sticky", left:0, zIndex:2, background:bg, minWidth:COL_N_W, width:COL_N_W });
+  const stickyVoce = (bg) => ({ position:"sticky", left:COL_N_W, zIndex:2, background:bg, boxShadow:"2px 0 4px -2px rgba(0,0,0,0.5)" });
+
   // Ogni volta che cambia la commessa selezionata, carica da Supabase
   // l'ultima versione salvata del budget (sovrascrive sempre lo stato locale,
   // così il tab mostra sempre l'ultima ipotesi di investimento caricata).
@@ -1119,8 +1126,8 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
         <table style={{ width:"100%", borderCollapse:"collapse", fontSize:"0.82rem" }}>
           <thead>
             <tr style={{ color:"#64748b", fontSize:"0.75rem", letterSpacing:"0.06em" }}>
-              <th style={{ textAlign:"left", padding:"8px 10px", borderBottom:"1px solid #334155" }}>N.</th>
-              <th style={{ textAlign:"left", padding:"8px 10px", borderBottom:"1px solid #334155" }}>VOCE</th>
+              <th style={{ textAlign:"left", padding:"8px 10px", borderBottom:"1px solid #334155", ...stickyN("#0a0f1e"), zIndex:3 }}>N.</th>
+              <th style={{ textAlign:"left", padding:"8px 10px", borderBottom:"1px solid #334155", ...stickyVoce("#0a0f1e"), zIndex:3 }}>VOCE</th>
               <th style={{ textAlign:"left", padding:"8px 10px", borderBottom:"1px solid #334155" }}>RESP.</th>
               <th style={{ textAlign:"right", padding:"8px 10px", borderBottom:"1px solid #334155" }}>STANDARD (€)</th>
               <th style={{ textAlign:"right", padding:"8px 10px", borderBottom:"1px solid #334155" }}>EXTRA (€)</th>
@@ -1152,8 +1159,8 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
                   const aperta = salVoceAperta === v.n;
                   const righe = [
                     <tr key={v.n} style={{ borderBottom:"1px solid #0f172a" }}>
-                      <td style={{ padding:"6px 10px", color:"#475569" }}>{v.n}</td>
-                      <td style={{ padding:"6px 10px", color:"#cbd5e1" }}>{v.voce}</td>
+                      <td style={{ padding:"6px 10px", color:"#475569", ...stickyN("#0a0f1e") }}>{v.n}</td>
+                      <td style={{ padding:"6px 10px", color:"#cbd5e1", ...stickyVoce("#0a0f1e") }}>{v.voce}</td>
                       <td style={{ padding:"6px 10px", color:"#64748b" }}>{v.resp}</td>
                       <td style={{ padding:"4px 10px", textAlign:"right" }}>
                         <input type="number" value={valori[v.n]?.std||""} onChange={e=>setVal(v.n,"std",e.target.value)} placeholder="0" style={inputStyle} />
@@ -1220,7 +1227,7 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
                   return righe;
                 }),
                 <tr key={"sub-"+cat} style={{ background:"#0f172a" }}>
-                  <td colSpan={3} style={{ padding:"6px 10px", color:"#475569", fontSize:"0.78rem" }}>subtotale {cat}</td>
+                  <td colSpan={3} style={{ padding:"6px 10px", color:"#475569", fontSize:"0.78rem", position:"sticky", left:0, zIndex:2, background:"#0f172a" }}>subtotale {cat}</td>
                   <td style={{ padding:"6px 10px", textAlign:"right", color:"#86efac", fontWeight:700 }}>{fmtEur(subStd)||"—"}</td>
                   <td style={{ padding:"6px 10px", textAlign:"right", color:"#fbbf24", fontWeight:700 }}>{fmtEur(subExtra)||"—"}</td>
                   <td style={{ padding:"6px 10px", textAlign:"right", color:"#e2e8f0", fontWeight:700 }}>{fmtEur(subTot)||"—"}</td>
