@@ -4,7 +4,13 @@ import { createClient } from "@supabase/supabase-js";
 // ── SUPABASE ──────────────────────────────────────────────────────────────────
 const SUPABASE_URL = "https://senygjjmynyyljetrylh.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNlbnlnampteW55eWxqZXRyeWxoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE1NDQ4ODMsImV4cCI6MjA5NzEyMDg4M30.QDiY125PiPojVquV9LcdbfCJgBINfHvUu2s10MxrQDo";
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: {
+    persistSession: true,      // mantiene la sessione nel browser tra le riaperture
+    autoRefreshToken: true,    // rinnova automaticamente il token prima che scada
+    detectSessionInUrl: true,  // gestisce il ritorno dai link (es. reset password)
+  },
+});
 
 // ── GOOGLE DRIVE ──────────────────────────────────────────────────────────────
 // Integrazione OAuth con Google Identity Services per creare cartelle e caricare
@@ -304,6 +310,33 @@ const trovaSottocartella = async (nome, parentId) => {
   return data.files?.[0]?.id || null;
 };
 
+// Cache/lock condivisa per la creazione delle sottocartelle-data. Evita che
+// caricando più file insieme vengano create più cartelle con la stessa data:
+// il primo upload che ha bisogno della cartella avvia la sua creazione e
+// memorizza la promessa; gli altri upload in parallelo riusano la stessa
+// promessa invece di crearne una propria. Chiave: rootId|percorso|data.
+const _lockCartelleData = new Map();
+
+const trovaOCreaCartellaDataConLock = async (idPadre, nomeData, chiave) => {
+  if (_lockCartelleData.has(chiave)) {
+    // Un altro upload sta già creando/ha creato questa cartella: riusa il risultato
+    return _lockCartelleData.get(chiave);
+  }
+  const promessa = (async () => {
+    let idData = await trovaSottocartella(nomeData, idPadre);
+    if (!idData) idData = await creaCartellaDrive(nomeData, idPadre);
+    return idData;
+  })();
+  _lockCartelleData.set(chiave, promessa);
+  try {
+    return await promessa;
+  } catch (e) {
+    // In caso di errore, libera il lock così un retry può ritentare
+    _lockCartelleData.delete(chiave);
+    throw e;
+  }
+};
+
 // Naviga dalla cartella radice della commessa fino alla sottocartella indicata
 // dal percorso (es. "PROGETTI IMPIANTI/ELETTRICO"), seguendo i nomi un livello alla volta.
 // Se il percorso è tra quelli con sottocartella a data, in più cerca/crea al volo
@@ -319,9 +352,8 @@ const trovaIdSottocartellaDaPercorso = async (rootId, percorso) => {
 
   if (CARTELLE_CON_SOTTOCARTELLA_DATA.has(percorso)) {
     const nomeData = dataDiOggiPerCartella();
-    let idData = await trovaSottocartella(nomeData, idCorrente);
-    if (!idData) idData = await creaCartellaDrive(nomeData, idCorrente);
-    idCorrente = idData;
+    const chiave = `${idCorrente}|${percorso}|${nomeData}`;
+    idCorrente = await trovaOCreaCartellaDataConLock(idCorrente, nomeData, chiave);
   }
 
   return idCorrente;
@@ -4297,7 +4329,11 @@ export default function App() {
 
 // ── LOGIN COMPONENT ───────────────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
-  const [email, setEmail] = useState("");
+  // Pre-compila l'email con l'ultima usata (salvata nel browser dopo un login
+  // riuscito). La password non viene mai memorizzata.
+  const [email, setEmail] = useState(() => {
+    try { return localStorage.getItem("ovs_ultima_email") || ""; } catch { return ""; }
+  });
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -4311,7 +4347,10 @@ function LoginScreen({ onLogin }) {
     setError("");
     const { error: err } = await supabase.auth.signInWithPassword({ email, password });
     if (err) setError("Credenziali non valide. Riprova.");
-    else onLogin();
+    else {
+      try { localStorage.setItem("ovs_ultima_email", email); } catch {}
+      onLogin();
+    }
     setLoading(false);
   };
 
@@ -4350,7 +4389,7 @@ function LoginScreen({ onLogin }) {
         </div>
         <div style={{ marginBottom:20 }}>
           <label style={{ color:"#94a3b8", fontSize:"0.78rem", display:"block", marginBottom:5 }}>PASSWORD</label>
-          <input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="••••••••" style={inp} onKeyDown={e=>e.key==="Enter"&&handleLogin()} />
+          <input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="••••••••" style={inp} autoFocus={!!email} onKeyDown={e=>e.key==="Enter"&&handleLogin()} />
         </div>
 
         {error && <div style={{ background:"#450a0a", border:"1px solid #ef4444", borderRadius:8, padding:"8px 12px", marginBottom:14, color:"#fca5a5", fontSize:"0.82rem" }}>{error}</div>}
