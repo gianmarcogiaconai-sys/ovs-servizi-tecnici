@@ -3164,6 +3164,25 @@ function TabAttivitaCommessa({ commessaIdGlobale, commessaSelezionata }) {
     catch (e) { setErrore(e.message || "Errore durante l'eliminazione."); carica(); }
   };
 
+  // Scarica un Excel con le attività di questa commessa (da fare + fatte).
+  const scaricaExcel = async () => {
+    const XLSX = await loadSheetJS();
+    const righe = attivita.map(a => ({
+      Attività: a.descrizione,
+      Stato: a.stato === "FATTO" ? "FATTO" : "DA FARE",
+      Scadenza: a.scadenza ? new Date(a.scadenza).toLocaleDateString("it-IT") : "",
+      Note: a.note || "",
+      Origine: a.origine === "vocale" ? "Vocale" : "Manuale",
+    }));
+    if (righe.length === 0) righe.push({ Attività:"(nessuna attività)", Stato:"", Scadenza:"", Note:"", Origine:"" });
+    const ws = XLSX.utils.json_to_sheet(righe);
+    ws["!cols"] = [{ wch:50 }, { wch:12 }, { wch:14 }, { wch:40 }, { wch:12 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Attività");
+    const nomeFile = `Attivita_${(commessaSelezionata?.nome || "commessa").replace(/[^a-zA-Z0-9]/g,"_")}.xlsx`;
+    XLSX.writeFile(wb, nomeFile);
+  };
+
   // ── registrazione vocale ──
   const toBase64Blob = (blob) => new Promise((res, rej) => {
     const r = new FileReader();
@@ -3334,6 +3353,14 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
 
           {errore && <div style={{ color:"#fca5a5", fontSize:"0.82rem", marginBottom:10 }}>{errore}</div>}
           {caricamento && <div style={{ color:"#7dd3fc", fontSize:"0.82rem" }}>Caricamento…</div>}
+
+          {/* intestazione lista + scarica excel */}
+          <div style={{ display:"flex", justifyContent:"flex-end", marginBottom:10 }}>
+            <button onClick={scaricaExcel} disabled={attivita.length===0}
+              style={{ background:"#0f172a", color:"#7dd3fc", border:"1px solid #334155", borderRadius:8, padding:"6px 14px", cursor: attivita.length===0?"not-allowed":"pointer", fontSize:"0.8rem", fontWeight:700, opacity: attivita.length===0?0.5:1 }}>
+              📥 Scarica Excel
+            </button>
+          </div>
 
           {/* da fare */}
           <div style={{ color:"#fca5a5", fontSize:"0.78rem", fontWeight:700, letterSpacing:"0.06em", marginBottom:8 }}>DA FARE ({daFare.length})</div>
@@ -4046,9 +4073,7 @@ const TABS_APERTURE = [
   { id:"budget",   label:"💶 Budget HP INV" },
   { id:"attivita", label:"🗒 Attività" },
   { id:"crono",    label:"📅 Cronoprogramma" },
-  { id:"vocale",   label:"🎙 Vocale" },
   { id:"ai",       label:"🤖 Analisi AI" },
-  { id:"pdf",      label:"📝 Editor PDF" },
   { id:"documenti",label:"📁 Documenti" },
 ];
 
@@ -4125,6 +4150,39 @@ export default function App() {
 
   const handleLogout = async () => { await supabase.auth.signOut(); };
 
+  // Stato connessione Google Drive: true se c'è un token valido in cache.
+  const [driveConnesso, setDriveConnesso] = useState(() => !!getStoredDriveToken());
+  const [driveConnessione, setDriveConnessione] = useState("idle"); // idle | connecting | error
+  const [driveConnErrore, setDriveConnErrore] = useState("");
+
+  // Mantiene il pulsante allineato allo stato reale del token: se scade o
+  // viene rimosso (es. dopo un 401), torna a mostrare "Connetti Drive".
+  useEffect(() => {
+    const id = setInterval(() => {
+      setDriveConnesso(!!getStoredDriveToken());
+    }, 10000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Connessione esplicita a Google Drive, innescata dal click sul pulsante:
+  // così il popup di autorizzazione Google nasce da un'azione diretta
+  // dell'utente e non viene bloccato dal browser. Dopo, il token resta in
+  // cache e gli upload (anche automatici) funzionano senza altri popup.
+  const connettiDrive = async () => {
+    setDriveConnessione("connecting");
+    setDriveConnErrore("");
+    try {
+      clearStoredDriveToken();           // forza una nuova autorizzazione pulita
+      await richiediTokenDrive();        // apre il popup Google (da click utente)
+      setDriveConnesso(true);
+      setDriveConnessione("idle");
+    } catch (e) {
+      setDriveConnesso(false);
+      setDriveConnessione("error");
+      setDriveConnErrore(e.message || "Connessione a Google Drive non riuscita.");
+    }
+  };
+
   if (authLoading) return (
     <div style={{ minHeight:"100vh", background:"#0a0f1e", display:"flex", alignItems:"center", justifyContent:"center", color:"#7dd3fc", fontSize:"1rem" }}>
       Caricamento…
@@ -4144,10 +4202,26 @@ export default function App() {
               <div style={{ fontWeight:800, fontSize:"1.15rem", letterSpacing:"-0.01em", color:"#f1f5f9" }}>Gestione Apertura Punti Vendita</div>
               <div style={{ color:"#64748b", fontSize:"0.78rem" }}>OVS / UPIM — Servizi Tecnici</div>
             </div>
-          <button onClick={handleLogout} style={{ marginLeft:"auto", background:"#1e293b", color:"#94a3b8", border:"1px solid #334155", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:"0.78rem" }}>
+          <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:8 }}>
+            <button onClick={connettiDrive} disabled={driveConnessione==="connecting"}
+              title={driveConnesso ? "Google Drive collegato" : "Collega Google Drive per archiviare i documenti"}
+              style={{ background: driveConnesso ? "#14532d" : "#1e293b", color: driveConnesso ? "#86efac" : "#fbbf24", border:`1px solid ${driveConnesso ? "#22c55e55" : "#92400e"}`, borderRadius:8, padding:"6px 14px", cursor: driveConnessione==="connecting" ? "wait" : "pointer", fontSize:"0.78rem", fontWeight:700 }}>
+              {driveConnessione==="connecting" ? "Connessione…" : (driveConnesso ? "✓ Drive collegato" : "🔗 Connetti Drive")}
+            </button>
+            <button onClick={handleLogout} style={{ background:"#1e293b", color:"#94a3b8", border:"1px solid #334155", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:"0.78rem" }}>
               🚪 Esci
             </button>
           </div>
+          </div>
+
+          {!driveConnesso && (
+            <div style={{ background:"#422006", border:"1px solid #92400e", borderRadius:8, padding:"8px 14px", marginBottom:14, color:"#fbbf24", fontSize:"0.8rem" }}>
+              ⚠ Google Drive non collegato. Clicca <strong>🔗 Connetti Drive</strong> in alto a destra per poter archiviare i documenti. Va fatto una volta per sessione/dispositivo.
+            </div>
+          )}
+          {driveConnessione==="error" && (
+            <div style={{ background:"#450a0a", border:"1px solid #ef4444", borderRadius:8, padding:"8px 14px", marginBottom:14, color:"#fca5a5", fontSize:"0.8rem" }}>{driveConnErrore}</div>
+          )}
 
           {/* interruttore tra le due aree */}
           <div style={{ display:"flex", gap:6, marginBottom:16 }}>
@@ -4214,8 +4288,6 @@ export default function App() {
         {tab==="crono"    && <TabCronoprogramma commessaIdGlobale={commessaIdGlobale} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="attivita" && <TabAttivitaCommessa commessaIdGlobale={commessaIdGlobale} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="ai"       && <TabAnalisiAI />}
-        {tab==="pdf"      && <TabEditorPDF />}
-        {tab==="vocale"   && <TabVocale commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="documenti"&& <TabDocumenti commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="progetti" && <TabProgetti />}
       </div>
@@ -4229,6 +4301,9 @@ function LoginScreen({ onLogin }) {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [resetInviato, setResetInviato] = useState(false); // mostra conferma invio mail
+  const [resetLoading, setResetLoading] = useState(false);
+  const [infoMsg, setInfoMsg] = useState("");
 
   const handleLogin = async () => {
     if (!email || !password) { setError("Inserisci email e password."); return; }
@@ -4238,6 +4313,24 @@ function LoginScreen({ onLogin }) {
     if (err) setError("Credenziali non valide. Riprova.");
     else onLogin();
     setLoading(false);
+  };
+
+  // Invia la mail di reset password tramite Supabase. L'utente riceve un link
+  // per impostare una nuova password. Richiede solo l'email.
+  const handleResetPassword = async () => {
+    setError(""); setInfoMsg("");
+    if (!email) { setError("Inserisci prima la tua email qui sopra, poi premi di nuovo \"Password dimenticata?\"."); return; }
+    setResetLoading(true);
+    const { error: err } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin,
+    });
+    setResetLoading(false);
+    if (err) {
+      setError("Non è stato possibile inviare la mail di reset. Controlla l'email e riprova.");
+    } else {
+      setResetInviato(true);
+      setInfoMsg(`Se l'email ${email} è registrata, riceverai un messaggio con il link per reimpostare la password. Controlla anche la cartella spam.`);
+    }
   };
 
   const inp = { background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"10px 14px", width:"100%", outline:"none", fontSize:"0.95rem", boxSizing:"border-box" };
@@ -4261,11 +4354,19 @@ function LoginScreen({ onLogin }) {
         </div>
 
         {error && <div style={{ background:"#450a0a", border:"1px solid #ef4444", borderRadius:8, padding:"8px 12px", marginBottom:14, color:"#fca5a5", fontSize:"0.82rem" }}>{error}</div>}
+        {infoMsg && <div style={{ background:"#14532d22", border:"1px solid #22c55e55", borderRadius:8, padding:"8px 12px", marginBottom:14, color:"#86efac", fontSize:"0.82rem" }}>{infoMsg}</div>}
 
         <button onClick={handleLogin} disabled={loading}
           style={{ width:"100%", background: loading?"#1e293b":"linear-gradient(135deg,#3b82f6,#06b6d4)", color: loading?"#475569":"#fff", border:"none", borderRadius:10, padding:"12px", fontWeight:700, fontSize:"0.95rem", cursor: loading?"not-allowed":"pointer" }}>
           {loading ? "Accesso in corso…" : "Accedi"}
         </button>
+
+        <div style={{ textAlign:"center", marginTop:14 }}>
+          <button onClick={handleResetPassword} disabled={resetLoading}
+            style={{ background:"none", border:"none", color:"#7dd3fc", fontSize:"0.82rem", cursor: resetLoading?"wait":"pointer", textDecoration:"underline" }}>
+            {resetLoading ? "Invio in corso…" : (resetInviato ? "Invia di nuovo il link" : "Password dimenticata?")}
+          </button>
+        </div>
 
         <div style={{ color:"#475569", fontSize:"0.75rem", textAlign:"center", marginTop:16 }}>
           Accesso riservato al personale autorizzato OVS
