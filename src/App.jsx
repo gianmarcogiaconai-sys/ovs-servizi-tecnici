@@ -262,10 +262,17 @@ const caricaFileSuDrive = async (file, folderId) => {
   return data.id;
 };
 
-// Salva (o sovrascrive) un file a nome fisso dentro una cartella Drive: se
-// esiste già un file con quel nome nella cartella, ne aggiorna il contenuto
-// (PATCH media), altrimenti lo crea. Usato per il file Excel unico della
-// Gestione Quotidiana, che si riscrive a ogni aggiornamento.
+// Scarica il contenuto (bytes) di un file da Drive dato il suo id. Restituisce
+// un ArrayBuffer, usato per aprire un Excel con SheetJS e modificarlo in pagina.
+const scaricaBytesDaDrive = async (fileId) => {
+  const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+  if (!res.ok) {
+    let msg = "Impossibile scaricare il file da Drive.";
+    try { const j = await res.json(); if (j.error) msg = j.error.message; } catch {}
+    throw new Error(msg);
+  }
+  return await res.arrayBuffer();
+};
 const upsertFileFissoSuDrive = async (nomeFile, blob, folderId, mimeType) => {
   // Cerca un file con quel nome nella cartella
   const query = encodeURIComponent(`name = '${nomeFile.replace(/'/g, "\\'")}' and '${folderId}' in parents and trashed = false`);
@@ -3949,6 +3956,14 @@ function TabCronoprogramma({ commessaIdGlobale, commessaSelezionata }) {
   const [notaNuova, setNotaNuova] = useState("");
   const [confermaElimina, setConfermaElimina] = useState(null); // id versione
 
+  // visione/modifica in pagina
+  const [versioneAperta, setVersioneAperta] = useState(null);   // versione attualmente visualizzata
+  const [grigliaExcel, setGrigliaExcel] = useState(null);        // matrice di celle se sto modificando un Excel
+  const [excelCaricamento, setExcelCaricamento] = useState(false);
+  const [excelErrore, setExcelErrore] = useState("");
+  const [salvataggioStato, setSalvataggioStato] = useState("idle"); // idle | salvando | done | error
+  const [notaNuovaVersione, setNotaNuovaVersione] = useState("");
+
   const tipoDaNome = (nome) => {
     const n = nome.toLowerCase();
     if (n.endsWith(".pdf")) return "pdf";
@@ -4027,6 +4042,94 @@ function TabCronoprogramma({ commessaIdGlobale, commessaSelezionata }) {
     }
   };
 
+  // Apre una versione in sola visione (PDF/Excel) tramite il viewer di Drive.
+  const visiona = (v) => {
+    setGrigliaExcel(null);
+    setExcelErrore("");
+    setSalvataggioStato("idle");
+    setVersioneAperta(v);
+  };
+
+  const chiudiVisore = () => {
+    setVersioneAperta(null);
+    setGrigliaExcel(null);
+    setExcelErrore("");
+  };
+
+  // Apre un Excel in modifica: scarica i byte da Drive, li legge con SheetJS
+  // e li trasforma in una griglia di celle modificabile.
+  const modificaExcel = async (v) => {
+    setVersioneAperta(v);
+    setExcelCaricamento(true);
+    setExcelErrore("");
+    setSalvataggioStato("idle");
+    try {
+      const XLSX = await loadSheetJS();
+      const buf = await scaricaBytesDaDrive(v.drive_file_id);
+      const wb = XLSX.read(buf, { type:"array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      // Converte in matrice di stringhe (intestazioni incluse), celle vuote = ""
+      const matrice = XLSX.utils.sheet_to_json(ws, { header:1, defval:"", raw:false });
+      // Normalizza la lunghezza delle righe alla riga più lunga
+      const maxCol = matrice.reduce((m,r)=>Math.max(m, r.length), 0);
+      const norm = matrice.map(r => { const c=[...r]; while(c.length<maxCol) c.push(""); return c.map(x=>x==null?"":String(x)); });
+      setGrigliaExcel(norm.length ? norm : [[""]]);
+    } catch (e) {
+      setExcelErrore(e.message || "Impossibile aprire l'Excel per la modifica.");
+      setGrigliaExcel(null);
+    } finally {
+      setExcelCaricamento(false);
+    }
+  };
+
+  const cambiaCella = (ri, ci, val) => {
+    setGrigliaExcel(prev => {
+      const copia = prev.map(r => [...r]);
+      copia[ri][ci] = val;
+      return copia;
+    });
+  };
+
+  // Salva la griglia modificata come NUOVA versione: genera un nuovo .xlsx,
+  // lo carica su Drive nella cartella CRONOPROGRAMMA e aggiunge una riga allo storico.
+  const salvaNuovaVersioneExcel = async () => {
+    if (!grigliaExcel || !versioneAperta) return;
+    setSalvataggioStato("salvando");
+    try {
+      const XLSX = await loadSheetJS();
+      const ws = XLSX.utils.aoa_to_sheet(grigliaExcel);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Cronoprogramma");
+      const wbArray = XLSX.write(wb, { type:"array", bookType:"xlsx" });
+      const blob = new Blob([wbArray], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      // nome file: stessa base + suffisso versione/data per non confondersi
+      const baseNome = (versioneAperta.nome_file || "cronoprogramma").replace(/\.(xlsx|xls|csv)$/i, "");
+      const nomeFile = `${baseNome}_rev_${new Date().toISOString().slice(0,10)}.xlsx`;
+      const fileObj = new File([blob], nomeFile, { type: blob.type });
+
+      const idCartella = await trovaIdSottocartellaDaPercorso(commessaSelezionata.drive_folder_id, "CRONOPROGRAMMA");
+      const driveFileId = await caricaFileSuDrive(fileObj, idCartella);
+      const driveLink = `https://drive.google.com/file/d/${driveFileId}/view`;
+      const { data, error } = await supabase.from("cronoprogrammi").insert({
+        commessa_id: commessaSelezionata.id,
+        nome_file: nomeFile,
+        drive_file_id: driveFileId,
+        drive_link: driveLink,
+        tipo_file: "excel",
+        note: notaNuovaVersione || "Modificato in-app",
+      }).select().single();
+      if (error) throw error;
+      setVersioni(prev => [data, ...prev]);
+      setNotaNuovaVersione("");
+      setSalvataggioStato("done");
+      // chiude l'editor e mostra la nuova versione in cima
+      setTimeout(() => { setSalvataggioStato("idle"); chiudiVisore(); }, 1500);
+    } catch (e) {
+      setExcelErrore(e.message || "Errore durante il salvataggio della nuova versione.");
+      setSalvataggioStato("error");
+    }
+  };
+
   return (
     <div>
       <div style={{ marginBottom:8, color:"#94a3b8", fontSize:"0.9rem" }}>
@@ -4058,6 +4161,71 @@ function TabCronoprogramma({ commessaIdGlobale, commessaSelezionata }) {
             {uploadStato==="error" && <div style={{ color:"#fca5a5", fontSize:"0.8rem", marginTop:8 }}>{uploadErrore}</div>}
           </div>
 
+          {/* visore / editor in pagina */}
+          {versioneAperta && (
+            <div style={{ background:"#0c1424", border:"1px solid #1e3a5f", borderRadius:12, padding:14, marginBottom:18 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10, flexWrap:"wrap" }}>
+                <span style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.85rem" }}>
+                  {grigliaExcel ? "✏️ Modifica Excel" : "👁 Visione"} — {versioneAperta.nome_file}
+                </span>
+                <button onClick={chiudiVisore} style={{ marginLeft:"auto", background:"#0f172a", color:"#94a3b8", border:"1px solid #334155", borderRadius:6, padding:"5px 12px", cursor:"pointer", fontSize:"0.78rem" }}>✕ Chiudi</button>
+              </div>
+
+              {excelCaricamento && <div style={{ color:"#7dd3fc", fontSize:"0.85rem", padding:"20px 0" }}>Apertura dell'Excel in corso…</div>}
+              {excelErrore && <div style={{ color:"#fca5a5", fontSize:"0.82rem", marginBottom:10 }}>{excelErrore}</div>}
+
+              {/* MODIFICA EXCEL: griglia di celle */}
+              {grigliaExcel && !excelCaricamento && (
+                <div>
+                  <div style={{ overflowX:"auto", border:"1px solid #334155", borderRadius:8, maxHeight:460, overflowY:"auto" }}>
+                    <table style={{ borderCollapse:"collapse", fontSize:"0.8rem" }}>
+                      <tbody>
+                        {grigliaExcel.map((riga, ri) => (
+                          <tr key={ri}>
+                            <td style={{ position:"sticky", left:0, background:"#0f172a", color:"#475569", padding:"2px 6px", border:"1px solid #1e293b", fontSize:"0.7rem", textAlign:"center", minWidth:30 }}>{ri+1}</td>
+                            {riga.map((cella, ci) => (
+                              <td key={ci} style={{ border:"1px solid #1e293b", padding:0 }}>
+                                <input
+                                  value={cella}
+                                  onChange={e=>cambiaCella(ri, ci, e.target.value)}
+                                  style={{ background: ri===0?"#1e293b":"#0c1424", color: ri===0?"#7dd3fc":"#e2e8f0", border:"none", padding:"5px 8px", outline:"none", minWidth:90, fontWeight: ri===0?700:400, fontSize:"0.8rem" }}
+                                />
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div style={{ marginTop:12, display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+                    <input value={notaNuovaVersione} onChange={e=>setNotaNuovaVersione(e.target.value)} placeholder="Nota nuova versione (opz.)" style={{ background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"7px 12px", outline:"none", fontSize:"0.82rem", flex:1, minWidth:180 }} />
+                    <button onClick={salvaNuovaVersioneExcel} disabled={salvataggioStato==="salvando"}
+                      style={{ background:"#1d4ed8", color:"#fff", border:"none", borderRadius:8, padding:"8px 16px", cursor: salvataggioStato==="salvando"?"wait":"pointer", fontWeight:700, fontSize:"0.82rem" }}>
+                      {salvataggioStato==="salvando" ? "Salvataggio…" : "💾 Salva come nuova versione"}
+                    </button>
+                    {salvataggioStato==="done" && <span style={{ color:"#86efac", fontSize:"0.82rem" }}>✓ Nuova versione salvata</span>}
+                  </div>
+                  <div style={{ color:"#475569", fontSize:"0.72rem", marginTop:8 }}>La prima riga (azzurra) è l'intestazione. Modificando le celle e salvando, crei una NUOVA versione nello storico: la precedente resta intatta.</div>
+                </div>
+              )}
+
+              {/* VISIONE: anteprima Drive (PDF/Excel) */}
+              {!grigliaExcel && !excelCaricamento && versioneAperta.drive_file_id && (
+                <div>
+                  <iframe
+                    title="anteprima cronoprogramma"
+                    src={`https://drive.google.com/file/d/${versioneAperta.drive_file_id}/preview`}
+                    style={{ width:"100%", height:520, border:"1px solid #334155", borderRadius:8, background:"#fff" }}
+                    allow="autoplay"
+                  />
+                  <div style={{ color:"#475569", fontSize:"0.72rem", marginTop:8 }}>
+                    Anteprima da Google Drive — puoi ingrandire e scorrere. {versioneAperta.tipo_file==="excel" && "Per modificarlo, chiudi e usa il pulsante ✏️ Modifica."}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* storico versioni */}
           <div style={{ color:"#7dd3fc", fontSize:"0.78rem", fontWeight:700, letterSpacing:"0.06em", marginBottom:10 }}>STORICO VERSIONI</div>
           {caricamento && <div style={{ color:"#7dd3fc", fontSize:"0.82rem" }}>Caricamento storico…</div>}
@@ -4076,6 +4244,14 @@ function TabCronoprogramma({ commessaIdGlobale, commessaSelezionata }) {
                   {new Date(v.caricato_il).toLocaleString("it-IT")}{v.note ? ` — ${v.note}` : ""}
                 </div>
               </div>
+              <button onClick={()=>visiona(v)} style={{ background:"#1e3a5f", color:"#fff", border:"none", borderRadius:6, padding:"5px 12px", fontSize:"0.78rem", fontWeight:700, cursor:"pointer", whiteSpace:"nowrap" }}>
+                👁 Visiona
+              </button>
+              {v.tipo_file==="excel" && (
+                <button onClick={()=>modificaExcel(v)} style={{ background:"#0f172a", color:"#86efac", border:"1px solid #22c55e55", borderRadius:6, padding:"5px 12px", fontSize:"0.78rem", fontWeight:700, cursor:"pointer", whiteSpace:"nowrap" }}>
+                  ✏️ Modifica
+                </button>
+              )}
               {v.drive_link && (
                 <a href={v.drive_link} target="_blank" rel="noopener noreferrer" style={{ background:"#0f172a", color:"#7dd3fc", border:"1px solid #334155", borderRadius:6, padding:"5px 12px", fontSize:"0.78rem", fontWeight:700, textDecoration:"none", whiteSpace:"nowrap" }}>
                   Apri ↗
