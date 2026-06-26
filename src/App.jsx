@@ -4274,6 +4274,169 @@ function TabCronoprogramma({ commessaIdGlobale, commessaSelezionata }) {
   );
 }
 
+// ── TAB CALENDARIO — vista mensile unificata delle scadenze ─────────────────────
+// Mostra in un unico calendario le scadenze sia delle attività di commessa
+// (attivita_commessa) sia della Gestione Quotidiana (progetto_attivita).
+function TabCalendario() {
+  const [mese, setMese] = useState(() => { const d = new Date(); return { anno: d.getFullYear(), m: d.getMonth() }; });
+  const [eventi, setEventi] = useState([]); // { id, titolo, data(Date), origine, contesto, stato }
+  const [caricamento, setCaricamento] = useState(false);
+  const [errore, setErrore] = useState("");
+  const [giornoSelezionato, setGiornoSelezionato] = useState(null);
+
+  const carica = async () => {
+    setCaricamento(true);
+    setErrore("");
+    try {
+      const [acRes, paRes, commRes, progRes] = await Promise.all([
+        supabase.from("attivita_commessa").select("*").not("scadenza", "is", null),
+        supabase.from("progetto_attivita").select("*").not("scadenza", "is", null),
+        supabase.from("commesse").select("id,nome"),
+        supabase.from("progetti").select("id,nome"),
+      ]);
+      if (acRes.error) throw acRes.error;
+      if (paRes.error) throw paRes.error;
+      const mappaComm = Object.fromEntries((commRes.data || []).map(c => [c.id, c.nome]));
+      const mappaProg = Object.fromEntries((progRes.data || []).map(p => [p.id, p.nome]));
+      const ev = [];
+      (acRes.data || []).forEach(a => {
+        if (!a.scadenza) return;
+        ev.push({ id: "ac-"+a.id, titolo: a.descrizione, data: new Date(a.scadenza), origine: "commessa", contesto: mappaComm[a.commessa_id] || "Commessa", stato: a.stato, note: a.note });
+      });
+      (paRes.data || []).forEach(a => {
+        if (!a.scadenza) return;
+        ev.push({ id: "pa-"+a.id, titolo: a.descrizione, data: new Date(a.scadenza), origine: "gestione", contesto: mappaProg[a.progetto_id] || "Progetto", stato: a.stato, note: a.note });
+      });
+      setEventi(ev);
+    } catch (e) {
+      setErrore(e.message || "Errore durante il caricamento delle scadenze.");
+    } finally {
+      setCaricamento(false);
+    }
+  };
+
+  useEffect(() => { carica(); }, []);
+
+  // Costruisce un link a Google Calendar con l'evento già compilato (modo semplice).
+  const linkGoogleCalendar = (ev) => {
+    const d = ev.data;
+    const giorno = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,"0")}${String(d.getDate()).padStart(2,"0")}`;
+    // evento di un giorno intero: dates=AAAAMMGG/AAAAMMGG(+1)
+    const dopo = new Date(d); dopo.setDate(dopo.getDate()+1);
+    const giornoDopo = `${dopo.getFullYear()}${String(dopo.getMonth()+1).padStart(2,"0")}${String(dopo.getDate()).padStart(2,"0")}`;
+    const titolo = encodeURIComponent(`${ev.titolo} — ${ev.contesto}`);
+    const dettagli = encodeURIComponent(`Scadenza ${ev.origine === "commessa" ? "attività commessa" : "attività gestione"}: ${ev.contesto}${ev.note ? "\nNote: "+ev.note : ""}`);
+    return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${titolo}&dates=${giorno}/${giornoDopo}&details=${dettagli}`;
+  };
+
+  const NOMI_MESI = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
+  const NOMI_GIORNI = ["Lun","Mar","Mer","Gio","Ven","Sab","Dom"];
+
+  const cambiaMese = (delta) => {
+    setGiornoSelezionato(null);
+    setMese(prev => {
+      let m = prev.m + delta, anno = prev.anno;
+      if (m < 0) { m = 11; anno--; }
+      if (m > 11) { m = 0; anno++; }
+      return { anno, m };
+    });
+  };
+
+  // Costruisce la griglia del mese (settimane che iniziano di lunedì)
+  const primoGiorno = new Date(mese.anno, mese.m, 1);
+  const giorniNelMese = new Date(mese.anno, mese.m + 1, 0).getDate();
+  let offset = primoGiorno.getDay() - 1; if (offset < 0) offset = 6; // lun=0
+  const celle = [];
+  for (let i = 0; i < offset; i++) celle.push(null);
+  for (let g = 1; g <= giorniNelMese; g++) celle.push(g);
+  while (celle.length % 7 !== 0) celle.push(null);
+
+  const oggi = new Date(); oggi.setHours(0,0,0,0);
+  const eventiDelGiorno = (g) => eventi.filter(e => e.data.getFullYear()===mese.anno && e.data.getMonth()===mese.m && e.data.getDate()===g);
+
+  const eventiGiornoSel = giornoSelezionato ? eventiDelGiorno(giornoSelezionato) : [];
+
+  return (
+    <div>
+      <div style={{ marginBottom:14, color:"#94a3b8", fontSize:"0.9rem" }}>
+        Tutte le scadenze in un unico posto: attività delle commesse e della Gestione Quotidiana. Clicca un giorno per vederne le attività e aggiungerle al tuo Google Calendar.
+      </div>
+
+      {/* navigazione mese */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
+        <button onClick={()=>cambiaMese(-1)} style={{ background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:"0.9rem" }}>‹ Prec.</button>
+        <div style={{ color:"#e2e8f0", fontWeight:700, fontSize:"1.05rem" }}>{NOMI_MESI[mese.m]} {mese.anno}</div>
+        <button onClick={()=>cambiaMese(1)} style={{ background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:"0.9rem" }}>Succ. ›</button>
+      </div>
+
+      {errore && <div style={{ color:"#fca5a5", fontSize:"0.82rem", marginBottom:10 }}>{errore}</div>}
+      {caricamento && <div style={{ color:"#7dd3fc", fontSize:"0.82rem", marginBottom:10 }}>Caricamento scadenze…</div>}
+
+      {/* intestazione giorni */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:4, marginBottom:4 }}>
+        {NOMI_GIORNI.map(g => <div key={g} style={{ textAlign:"center", color:"#64748b", fontSize:"0.72rem", fontWeight:700, padding:"4px 0" }}>{g}</div>)}
+      </div>
+
+      {/* griglia mese */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:4 }}>
+        {celle.map((g, i) => {
+          if (g === null) return <div key={i} style={{ minHeight:74 }} />;
+          const evs = eventiDelGiorno(g);
+          const dataCella = new Date(mese.anno, mese.m, g); dataCella.setHours(0,0,0,0);
+          const isOggi = dataCella.getTime() === oggi.getTime();
+          const giorniAllaScadenza = Math.round((dataCella - oggi) / 86400000);
+          const imminente = evs.length > 0 && giorniAllaScadenza >= 0 && giorniAllaScadenza <= 7;
+          const scaduto = evs.some(e => e.stato !== "FATTO") && giorniAllaScadenza < 0;
+          const selezionato = giornoSelezionato === g;
+          return (
+            <div key={i} onClick={()=>setGiornoSelezionato(g)}
+              style={{ minHeight:74, background: selezionato?"#1e3a5f":(isOggi?"#0c3547":"#1e293b"), border:`1px solid ${selezionato?"#3b82f6":(scaduto?"#7f1d1d":(imminente?"#92400e":"#334155"))}`, borderRadius:8, padding:"5px 6px", cursor:"pointer", overflow:"hidden" }}>
+              <div style={{ color: isOggi?"#7dd3fc":"#94a3b8", fontSize:"0.78rem", fontWeight: isOggi?700:400, marginBottom:3 }}>{g}</div>
+              {evs.slice(0,2).map(e => (
+                <div key={e.id} style={{ fontSize:"0.66rem", color: e.stato==="FATTO"?"#64748b":"#e2e8f0", textDecoration: e.stato==="FATTO"?"line-through":"none", background: e.origine==="commessa"?"#1e3a5f":"#422006", borderRadius:4, padding:"1px 4px", marginBottom:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                  {e.titolo}
+                </div>
+              ))}
+              {evs.length > 2 && <div style={{ fontSize:"0.62rem", color:"#7dd3fc" }}>+{evs.length-2} altri</div>}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* legenda */}
+      <div style={{ display:"flex", gap:16, marginTop:12, flexWrap:"wrap", fontSize:"0.72rem", color:"#64748b" }}>
+        <span><span style={{ display:"inline-block", width:10, height:10, background:"#1e3a5f", borderRadius:2, marginRight:4 }} />Attività commessa</span>
+        <span><span style={{ display:"inline-block", width:10, height:10, background:"#422006", borderRadius:2, marginRight:4 }} />Gestione quotidiana</span>
+        <span><span style={{ display:"inline-block", width:10, height:10, border:"1px solid #92400e", borderRadius:2, marginRight:4 }} />Scadenza entro 7 giorni</span>
+        <span><span style={{ display:"inline-block", width:10, height:10, border:"1px solid #7f1d1d", borderRadius:2, marginRight:4 }} />Scaduta</span>
+      </div>
+
+      {/* dettaglio giorno selezionato */}
+      {giornoSelezionato && (
+        <div style={{ marginTop:18, background:"#1e293b", border:"1px solid #334155", borderRadius:12, padding:16 }}>
+          <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.9rem", marginBottom:10 }}>
+            {giornoSelezionato} {NOMI_MESI[mese.m]} {mese.anno}
+          </div>
+          {eventiGiornoSel.length === 0 && <div style={{ color:"#64748b", fontSize:"0.85rem" }}>Nessuna scadenza in questo giorno.</div>}
+          {eventiGiornoSel.map(e => (
+            <div key={e.id} style={{ display:"flex", alignItems:"center", gap:10, background:"#0f172a", border:"1px solid #334155", borderRadius:8, padding:"10px 12px", marginBottom:7 }}>
+              <span style={{ fontSize:"0.66rem", color:"#fff", background: e.origine==="commessa"?"#1e3a5f":"#422006", borderRadius:99, padding:"2px 8px", whiteSpace:"nowrap" }}>{e.origine==="commessa"?"Commessa":"Gestione"}</span>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ color: e.stato==="FATTO"?"#64748b":"#e2e8f0", fontSize:"0.88rem", fontWeight:600, textDecoration: e.stato==="FATTO"?"line-through":"none" }}>{e.titolo}</div>
+                <div style={{ color:"#64748b", fontSize:"0.74rem" }}>{e.contesto}{e.stato==="FATTO"?" · fatta":""}</div>
+              </div>
+              <a href={linkGoogleCalendar(e)} target="_blank" rel="noopener noreferrer"
+                style={{ background:"#1d4ed8", color:"#fff", borderRadius:6, padding:"5px 12px", fontSize:"0.76rem", fontWeight:700, textDecoration:"none", whiteSpace:"nowrap" }}>
+                📅 Aggiungi a Google Calendar
+              </a>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const TABS_APERTURE = [
   { id:"scheda",   label:"📋 Scheda Negozio" },
   { id:"workflow", label:"✅ Workflow" },
@@ -4289,8 +4452,12 @@ const TABS_GESTIONE = [
   { id:"progetti", label:"🗂 Progetti & Attività" },
 ];
 
+const TABS_CALENDARIO = [
+  { id:"calendario", label:"📅 Calendario scadenze" },
+];
+
 // Primo tab di ciascuna area, usato quando si cambia interruttore
-const TAB_DEFAULT = { aperture:"workflow", gestione:"progetti" };
+const TAB_DEFAULT = { aperture:"workflow", gestione:"progetti", calendario:"calendario" };
 
 export default function App() {
   const [area, setArea] = useState("aperture"); // aperture | gestione
@@ -4441,6 +4608,10 @@ export default function App() {
               style={{ flex:1, background: area==="gestione"?"linear-gradient(135deg,#3b82f6,#06b6d4)":"#0f172a", color: area==="gestione"?"#fff":"#94a3b8", border:`1px solid ${area==="gestione"?"#3b82f6":"#334155"}`, borderRadius:10, padding:"10px 16px", cursor:"pointer", fontSize:"0.88rem", fontWeight:700, transition:"all 0.15s" }}>
               📋 Gestione Quotidiana
             </button>
+            <button onClick={() => cambiaArea("calendario")}
+              style={{ flex:1, background: area==="calendario"?"linear-gradient(135deg,#3b82f6,#06b6d4)":"#0f172a", color: area==="calendario"?"#fff":"#94a3b8", border:`1px solid ${area==="calendario"?"#3b82f6":"#334155"}`, borderRadius:10, padding:"10px 16px", cursor:"pointer", fontSize:"0.88rem", fontWeight:700, transition:"all 0.15s" }}>
+              📅 Calendario
+            </button>
           </div>
 
           {/* selettore globale tipo + brand + commessa: solo nell'area Aperture */}
@@ -4477,7 +4648,7 @@ export default function App() {
           {area==="aperture" && caricamentoCommesseGlobali && <div style={{ color:"#475569", fontSize:"0.72rem", marginTop:-10, marginBottom:10 }}>Caricamento commesse…</div>}
 
           <div style={{ display:"flex", gap:2, overflowX:"auto" }}>
-            {(area==="aperture" ? TABS_APERTURE : TABS_GESTIONE).map(t=>(
+            {(area==="aperture" ? TABS_APERTURE : area==="gestione" ? TABS_GESTIONE : TABS_CALENDARIO).map(t=>(
               <button key={t.id} onClick={()=>setTab(t.id)}
                 style={{ background:tab===t.id?"#1e293b":"transparent", color:tab===t.id?"#e2e8f0":"#64748b", border:"none", borderBottom:tab===t.id?"2px solid #3b82f6":"2px solid transparent", padding:"10px 16px", cursor:"pointer", fontSize:"0.85rem", fontWeight:tab===t.id?600:400, transition:"all 0.15s", borderRadius:"8px 8px 0 0", whiteSpace:"nowrap" }}>
                 {t.label}
@@ -4498,6 +4669,7 @@ export default function App() {
         {tab==="ai"       && <TabAnalisiAI />}
         {tab==="documenti"&& <TabDocumenti commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="progetti" && <TabProgetti />}
+        {tab==="calendario" && <TabCalendario />}
       </div>
     </div>
   );
