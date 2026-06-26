@@ -71,6 +71,30 @@ const dataDiOggiPerCartella = () => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 };
 
+// Converte l'output dell'AID sul vocale in una data reale AAAA-MM-GG, usando
+// SEMPRE l'orologio del dispositivo come "oggi". Questo evita che il modello
+// usi una propria data interna sbagliata: l'AI fornisce solo la distanza in
+// giorni da oggi (giorni_da_oggi) oppure una data esplicita del calendario
+// (data_esplicita) quando l'utente nomina un giorno preciso; il calcolo della
+// data effettiva lo facciamo qui nel codice.
+const risolviScadenzaAI = (item) => {
+  // data_esplicita ha priorità solo se è una data valida AAAA-MM-GG
+  if (item && typeof item.data_esplicita === "string" && /^\d{4}-\d{2}-\d{2}$/.test(item.data_esplicita)) {
+    return item.data_esplicita;
+  }
+  // altrimenti usa giorni_da_oggi (numero intero, anche 0 = oggi)
+  if (item && item.giorni_da_oggi !== undefined && item.giorni_da_oggi !== null && item.giorni_da_oggi !== "") {
+    const n = Number(item.giorni_da_oggi);
+    if (!Number.isNaN(n)) {
+      const d = new Date();
+      d.setHours(0,0,0,0);
+      d.setDate(d.getDate() + n);
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    }
+  }
+  return null; // nessuna scadenza indicata
+};
+
 // Carica la libreria SheetJS via CDN per leggere file Excel/CSV nel browser.
 // Condivisa tra il tab Documenti (classificazione AI) e il tab Budget (import HP INV).
 const loadSheetJS = () => new Promise((resolve, reject) => {
@@ -3266,16 +3290,7 @@ function TabAttivitaCommessa({ commessaIdGlobale, commessaSelezionata }) {
       const mime = blob.type || "audio/webm";
       const elencoAttuali = attivita.map(a => `- (id:${a.id}) [${a.stato}] ${a.descrizione}`).join("\n") || "(nessuna attività ancora presente)";
 
-      // Data di oggi (in italiano) da passare all'AI per interpretare
-      // espressioni come "oggi", "domani", "venerdì", "tra 3 giorni".
-      const adesso = new Date();
-      const oggiISO = adesso.toISOString().slice(0,10);
-      const giorniSett = ["domenica","lunedì","martedì","mercoledì","giovedì","venerdì","sabato"];
-      const oggiNome = giorniSett[adesso.getDay()];
-
       const promptText = `Sei un assistente che gestisce la lista di attività di un cantiere/negozio per un project manager tecnico. Ascolta l'audio allegato (in italiano) e aggiorna la lista delle attività di questa commessa.
-
-Oggi è ${oggiNome} ${oggiISO} (usa questa data come riferimento per interpretare le date dette a voce).
 
 ATTIVITÀ ATTUALI di questa commessa:
 ${elencoAttuali}
@@ -3283,16 +3298,18 @@ ${elencoAttuali}
 Regole:
 - Se nell'audio si dice che un'attività esistente è stata completata/fatta/finita, marcala come FATTA (usa il suo id).
 - Se si parla di qualcosa di nuovo da fare, crea una nuova attività con una descrizione SINTETICA e PROFESSIONALE (non trascrivere parola per parola: riformula in modo pulito e conciso, come una voce di to-do).
-- Estrai la DATA di scadenza se menzionata, anche in forma relativa: "oggi", "domani", "dopodomani", "venerdì", "lunedì prossimo", "tra 3 giorni", "la prossima settimana", "il 15 luglio". Convertila SEMPRE in formato AAAA-MM-GG usando la data di oggi come riferimento. Per "la prossima settimana" usa il lunedì della settimana successiva.
+- Per la SCADENZA NON calcolare tu la data del calendario e NON usare nessuna tua conoscenza su quale sia la data odierna. Indica invece:
+   • "giorni_da_oggi": un numero intero che dice tra quanti giorni cade la scadenza rispetto a oggi (0 = oggi, 1 = domani, 2 = dopodomani, ecc.). Per i giorni della settimana ("venerdì", "lunedì prossimo") e per "la prossima settimana" calcola quanti giorni mancano da oggi e mettilo qui. Lascia vuoto se non si parla di scadenza.
+   • "data_esplicita": SOLO se l'utente nomina una data precisa del calendario (es. "il 15 luglio"), scrivila in formato AAAA-MM-GG (per l'anno usa quello in corso o il prossimo se la data è già passata). Altrimenti lascia vuoto.
 - Estrai l'ORA se menzionata (es. "alle 13:30", "alle 9"), in formato HH:MM (24h). Se non viene detta un'ora, lascia vuoto.
-- NON inventare il preavviso: lascialo sempre vuoto (il campo preavviso non è gestito qui).
+- NON inventare il preavviso.
 - Ignora il parlato irrilevante (saluti, esitazioni).
 
 Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backtick, con questa struttura esatta:
 {
   "completate": ["id1", "id2"],
   "nuove": [
-    { "descrizione": "testo sintetico attività", "scadenza": "AAAA-MM-GG oppure stringa vuota", "ora": "HH:MM oppure stringa vuota", "note": "eventuale nota breve oppure stringa vuota" }
+    { "descrizione": "testo sintetico attività", "giorni_da_oggi": "numero intero oppure stringa vuota", "data_esplicita": "AAAA-MM-GG oppure stringa vuota", "ora": "HH:MM oppure stringa vuota", "note": "eventuale nota breve oppure stringa vuota" }
   ]
 }`;
 
@@ -3321,7 +3338,7 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
           commessa_id: commessaId,
           descrizione: n.descrizione.trim(),
           stato: "DA FARE",
-          scadenza: n.scadenza || null,
+          scadenza: risolviScadenzaAI(n),
           ora_scadenza: n.ora || null,
           note: n.note || null,
           origine: "vocale",
@@ -3711,15 +3728,7 @@ function TabProgetti() {
         ? `\nIMPORTANTE: l'utente sta parlando SOLO del progetto con id "${progettoSelezionato}". Assegna tutte le nuove attività e gli aggiornamenti a quel progetto, non ad altri.`
         : `\nL'utente può parlare di più progetti diversi nello stesso audio: assegna ogni cosa al progetto giusto in base a ciò che dice. Se nomina un progetto che non esiste tra quelli elencati, crealo.`;
 
-      // Data di oggi per interpretare le date relative dette a voce
-      const adesso = new Date();
-      const oggiISO = adesso.toISOString().slice(0,10);
-      const giorniSett = ["domenica","lunedì","martedì","mercoledì","giovedì","venerdì","sabato"];
-      const oggiNome = giorniSett[adesso.getDay()];
-
       const promptText = `Sei un assistente che gestisce le attività di gestione quotidiana di un project manager tecnico, organizzate per progetto/tema (es. Cloud, Telefonia, Sicurezza, Chiusure PV, Spagna, UPIM). Ascolta l'audio in italiano e aggiorna progetti e attività.
-
-Oggi è ${oggiNome} ${oggiISO} (usa questa data come riferimento per interpretare le date dette a voce).
 
 PROGETTI E ATTIVITÀ ATTUALI:
 ${contesto || "(nessun progetto ancora)"}
@@ -3729,16 +3738,18 @@ Regole:
 - Se si dice che un'attività esistente è stata completata/fatta/finita, marcala come FATTA (usa il suo id).
 - Se si parla di qualcosa di nuovo da fare, crea una nuova attività con descrizione SINTETICA e PROFESSIONALE (non trascrivere parola per parola: riformula in modo pulito e conciso).
 - Assegna ogni nuova attività al progetto giusto (per nome). Se il progetto non esiste, indicane il nome in "nuovo_progetto".
-- Estrai la DATA di scadenza se menzionata, anche relativa: "oggi", "domani", "venerdì", "tra 3 giorni", "la prossima settimana", "il 15 luglio". Convertila SEMPRE in AAAA-MM-GG usando la data di oggi come riferimento. Per "la prossima settimana" usa il lunedì della settimana successiva.
-- Estrai l'ORA se menzionata (es. "alle 13:30", "alle 9") in formato HH:MM (24h). Se non detta, lascia vuoto.
-- NON inventare il preavviso: lascialo sempre vuoto.
+- Per la SCADENZA NON calcolare tu la data del calendario e NON usare nessuna tua conoscenza su quale sia la data odierna. Indica invece:
+   • "giorni_da_oggi": numero intero di giorni da oggi (0 = oggi, 1 = domani, ...). Per "venerdì", "lunedì prossimo", "la prossima settimana" calcola quanti giorni mancano e mettilo qui. Vuoto se non si parla di scadenza.
+   • "data_esplicita": SOLO se viene nominata una data precisa del calendario (es. "il 15 luglio"), in formato AAAA-MM-GG. Altrimenti vuoto.
+- Estrai l'ORA se menzionata (es. "alle 13:30") in formato HH:MM (24h). Se non detta, lascia vuoto.
+- NON inventare il preavviso.
 - Ignora il parlato irrilevante.
 
 Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backtick:
 {
   "completate": ["idAttività1", "idAttività2"],
   "nuove": [
-    { "progetto_id": "id del progetto esistente, oppure stringa vuota se nuovo", "nuovo_progetto": "nome nuovo progetto se non esiste, altrimenti stringa vuota", "descrizione": "testo sintetico", "scadenza": "AAAA-MM-GG o vuoto", "ora": "HH:MM o vuoto", "note": "nota breve o vuoto" }
+    { "progetto_id": "id del progetto esistente, oppure stringa vuota se nuovo", "nuovo_progetto": "nome nuovo progetto se non esiste, altrimenti stringa vuota", "descrizione": "testo sintetico", "giorni_da_oggi": "numero intero o vuoto", "data_esplicita": "AAAA-MM-GG o vuoto", "ora": "HH:MM o vuoto", "note": "nota breve o vuoto" }
   ]
 }`;
 
@@ -3786,7 +3797,7 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
           progetto_id: pid,
           descrizione: n.descrizione.trim(),
           stato: "DA FARE",
-          scadenza: n.scadenza || null,
+          scadenza: risolviScadenzaAI(n),
           ora_scadenza: n.ora || null,
           note: n.note || null,
         });
