@@ -3266,7 +3266,16 @@ function TabAttivitaCommessa({ commessaIdGlobale, commessaSelezionata }) {
       const mime = blob.type || "audio/webm";
       const elencoAttuali = attivita.map(a => `- (id:${a.id}) [${a.stato}] ${a.descrizione}`).join("\n") || "(nessuna attività ancora presente)";
 
+      // Data di oggi (in italiano) da passare all'AI per interpretare
+      // espressioni come "oggi", "domani", "venerdì", "tra 3 giorni".
+      const adesso = new Date();
+      const oggiISO = adesso.toISOString().slice(0,10);
+      const giorniSett = ["domenica","lunedì","martedì","mercoledì","giovedì","venerdì","sabato"];
+      const oggiNome = giorniSett[adesso.getDay()];
+
       const promptText = `Sei un assistente che gestisce la lista di attività di un cantiere/negozio per un project manager tecnico. Ascolta l'audio allegato (in italiano) e aggiorna la lista delle attività di questa commessa.
+
+Oggi è ${oggiNome} ${oggiISO} (usa questa data come riferimento per interpretare le date dette a voce).
 
 ATTIVITÀ ATTUALI di questa commessa:
 ${elencoAttuali}
@@ -3274,14 +3283,16 @@ ${elencoAttuali}
 Regole:
 - Se nell'audio si dice che un'attività esistente è stata completata/fatta/finita, marcala come FATTA (usa il suo id).
 - Se si parla di qualcosa di nuovo da fare, crea una nuova attività con una descrizione SINTETICA e PROFESSIONALE (non trascrivere parola per parola: riformula in modo pulito e conciso, come una voce di to-do).
-- Se si menziona una scadenza o data per una nuova attività, includila (formato AAAA-MM-GG).
+- Estrai la DATA di scadenza se menzionata, anche in forma relativa: "oggi", "domani", "dopodomani", "venerdì", "lunedì prossimo", "tra 3 giorni", "la prossima settimana", "il 15 luglio". Convertila SEMPRE in formato AAAA-MM-GG usando la data di oggi come riferimento. Per "la prossima settimana" usa il lunedì della settimana successiva.
+- Estrai l'ORA se menzionata (es. "alle 13:30", "alle 9"), in formato HH:MM (24h). Se non viene detta un'ora, lascia vuoto.
+- NON inventare il preavviso: lascialo sempre vuoto (il campo preavviso non è gestito qui).
 - Ignora il parlato irrilevante (saluti, esitazioni).
 
 Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backtick, con questa struttura esatta:
 {
   "completate": ["id1", "id2"],
   "nuove": [
-    { "descrizione": "testo sintetico attività", "scadenza": "AAAA-MM-GG oppure stringa vuota", "note": "eventuale nota breve oppure stringa vuota" }
+    { "descrizione": "testo sintetico attività", "scadenza": "AAAA-MM-GG oppure stringa vuota", "ora": "HH:MM oppure stringa vuota", "note": "eventuale nota breve oppure stringa vuota" }
   ]
 }`;
 
@@ -3311,6 +3322,7 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
           descrizione: n.descrizione.trim(),
           stato: "DA FARE",
           scadenza: n.scadenza || null,
+          ora_scadenza: n.ora || null,
           note: n.note || null,
           origine: "vocale",
         }).select().single();
@@ -3461,7 +3473,8 @@ function TabProgetti() {
   const [confermaEliminaProgetto, setConfermaEliminaProgetto] = useState(null); // id progetto in conferma
 
   // form nuova attività
-  const [nuovaAtt, setNuovaAtt] = useState({ descrizione:"", scadenza:"", preavviso_giorni:"", note:"" });
+  const [nuovaAtt, setNuovaAtt] = useState({ descrizione:"", scadenza:"", ora_scadenza:"", preavviso_giorni:"", note:"" });
+  const [avvisoScadenza, setAvvisoScadenza] = useState("");
   const [salvandoAtt, setSalvandoAtt] = useState(false);
 
   // vocale
@@ -3538,6 +3551,12 @@ function TabProgetti() {
 
   const aggiungiAttivita = async () => {
     if (!nuovaAtt.descrizione.trim() || !progettoSelezionato) return;
+    setAvvisoScadenza("");
+    // Avviso: preavviso impostato ma scadenza mancante (non avrebbe a cosa riferirsi)
+    if (nuovaAtt.preavviso_giorni && !nuovaAtt.scadenza) {
+      setAvvisoScadenza("Hai indicato un preavviso ma manca la data di scadenza: senza scadenza l'attività non comparirà nel calendario. Aggiungi una data o togli il preavviso.");
+      return;
+    }
     setSalvandoAtt(true);
     try {
       const payload = {
@@ -3545,13 +3564,14 @@ function TabProgetti() {
         descrizione: nuovaAtt.descrizione.trim(),
         stato: "DA FARE",
         scadenza: nuovaAtt.scadenza || null,
+        ora_scadenza: nuovaAtt.ora_scadenza || null,
         preavviso_giorni: nuovaAtt.preavviso_giorni ? Number(nuovaAtt.preavviso_giorni) : null,
         note: nuovaAtt.note || null,
       };
       const { data, error } = await supabase.from("progetto_attivita").insert(payload).select().single();
       if (error) throw error;
       setAttivita(prev => [...prev, data]);
-      setNuovaAtt({ descrizione:"", scadenza:"", preavviso_giorni:"", note:"" });
+      setNuovaAtt({ descrizione:"", scadenza:"", ora_scadenza:"", preavviso_giorni:"", note:"" });
     } catch (e) {
       setErrore(e.message || "Errore durante l'aggiunta dell'attività.");
     } finally {
@@ -3691,7 +3711,15 @@ function TabProgetti() {
         ? `\nIMPORTANTE: l'utente sta parlando SOLO del progetto con id "${progettoSelezionato}". Assegna tutte le nuove attività e gli aggiornamenti a quel progetto, non ad altri.`
         : `\nL'utente può parlare di più progetti diversi nello stesso audio: assegna ogni cosa al progetto giusto in base a ciò che dice. Se nomina un progetto che non esiste tra quelli elencati, crealo.`;
 
+      // Data di oggi per interpretare le date relative dette a voce
+      const adesso = new Date();
+      const oggiISO = adesso.toISOString().slice(0,10);
+      const giorniSett = ["domenica","lunedì","martedì","mercoledì","giovedì","venerdì","sabato"];
+      const oggiNome = giorniSett[adesso.getDay()];
+
       const promptText = `Sei un assistente che gestisce le attività di gestione quotidiana di un project manager tecnico, organizzate per progetto/tema (es. Cloud, Telefonia, Sicurezza, Chiusure PV, Spagna, UPIM). Ascolta l'audio in italiano e aggiorna progetti e attività.
+
+Oggi è ${oggiNome} ${oggiISO} (usa questa data come riferimento per interpretare le date dette a voce).
 
 PROGETTI E ATTIVITÀ ATTUALI:
 ${contesto || "(nessun progetto ancora)"}
@@ -3701,14 +3729,16 @@ Regole:
 - Se si dice che un'attività esistente è stata completata/fatta/finita, marcala come FATTA (usa il suo id).
 - Se si parla di qualcosa di nuovo da fare, crea una nuova attività con descrizione SINTETICA e PROFESSIONALE (non trascrivere parola per parola: riformula in modo pulito e conciso).
 - Assegna ogni nuova attività al progetto giusto (per nome). Se il progetto non esiste, indicane il nome in "nuovo_progetto".
-- Se viene menzionata una scadenza, includila in formato AAAA-MM-GG.
+- Estrai la DATA di scadenza se menzionata, anche relativa: "oggi", "domani", "venerdì", "tra 3 giorni", "la prossima settimana", "il 15 luglio". Convertila SEMPRE in AAAA-MM-GG usando la data di oggi come riferimento. Per "la prossima settimana" usa il lunedì della settimana successiva.
+- Estrai l'ORA se menzionata (es. "alle 13:30", "alle 9") in formato HH:MM (24h). Se non detta, lascia vuoto.
+- NON inventare il preavviso: lascialo sempre vuoto.
 - Ignora il parlato irrilevante.
 
 Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backtick:
 {
   "completate": ["idAttività1", "idAttività2"],
   "nuove": [
-    { "progetto_id": "id del progetto esistente, oppure stringa vuota se nuovo", "nuovo_progetto": "nome nuovo progetto se non esiste, altrimenti stringa vuota", "descrizione": "testo sintetico", "scadenza": "AAAA-MM-GG o vuoto", "note": "nota breve o vuoto" }
+    { "progetto_id": "id del progetto esistente, oppure stringa vuota se nuovo", "nuovo_progetto": "nome nuovo progetto se non esiste, altrimenti stringa vuota", "descrizione": "testo sintetico", "scadenza": "AAAA-MM-GG o vuoto", "ora": "HH:MM o vuoto", "note": "nota breve o vuoto" }
   ]
 }`;
 
@@ -3757,6 +3787,7 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
           descrizione: n.descrizione.trim(),
           stato: "DA FARE",
           scadenza: n.scadenza || null,
+          ora_scadenza: n.ora || null,
           note: n.note || null,
         });
         contNuove++;
@@ -3900,12 +3931,17 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
                     <label style={{ color:"#64748b", fontSize:"0.72rem", display:"block", marginBottom:2 }}>Scadenza (opzionale)</label>
                     <input type="date" value={nuovaAtt.scadenza} onChange={e => setNuovaAtt(v => ({ ...v, scadenza:e.target.value }))} style={inp} />
                   </div>
+                  <div style={{ flex:1, minWidth:110 }}>
+                    <label style={{ color:"#64748b", fontSize:"0.72rem", display:"block", marginBottom:2 }}>Ora (opzionale)</label>
+                    <input type="time" value={nuovaAtt.ora_scadenza} onChange={e => setNuovaAtt(v => ({ ...v, ora_scadenza:e.target.value }))} style={inp} />
+                  </div>
                   <div style={{ flex:1, minWidth:140 }}>
                     <label style={{ color:"#64748b", fontSize:"0.72rem", display:"block", marginBottom:2 }}>Preavviso (giorni prima)</label>
                     <input type="number" value={nuovaAtt.preavviso_giorni} onChange={e => setNuovaAtt(v => ({ ...v, preavviso_giorni:e.target.value }))} placeholder="es. 90" style={inp} />
                   </div>
                 </div>
                 <input value={nuovaAtt.note} onChange={e => setNuovaAtt(v => ({ ...v, note:e.target.value }))} placeholder="Note (opzionale)" style={{ ...inp, marginBottom:8 }} />
+                {avvisoScadenza && <div style={{ background:"#422006", border:"1px solid #92400e", borderRadius:8, padding:"8px 12px", marginBottom:8, color:"#fbbf24", fontSize:"0.78rem" }}>{avvisoScadenza}</div>}
                 <button onClick={aggiungiAttivita} disabled={salvandoAtt || !nuovaAtt.descrizione.trim()} style={{ background:"#1d4ed8", color:"#fff", border:"none", borderRadius:8, padding:"7px 16px", cursor: nuovaAtt.descrizione.trim()?"pointer":"not-allowed", fontSize:"0.82rem", fontWeight:700, opacity: nuovaAtt.descrizione.trim()?1:0.5 }}>
                   {salvandoAtt ? "Aggiunta…" : "+ Aggiungi attività"}
                 </button>
@@ -4301,11 +4337,11 @@ function TabCalendario() {
       const ev = [];
       (acRes.data || []).forEach(a => {
         if (!a.scadenza) return;
-        ev.push({ id: "ac-"+a.id, titolo: a.descrizione, data: new Date(a.scadenza), origine: "commessa", contesto: mappaComm[a.commessa_id] || "Commessa", stato: a.stato, note: a.note });
+        ev.push({ id: "ac-"+a.id, titolo: a.descrizione, data: new Date(a.scadenza), ora: a.ora_scadenza || "", origine: "commessa", contesto: mappaComm[a.commessa_id] || "Commessa", stato: a.stato, note: a.note });
       });
       (paRes.data || []).forEach(a => {
         if (!a.scadenza) return;
-        ev.push({ id: "pa-"+a.id, titolo: a.descrizione, data: new Date(a.scadenza), origine: "gestione", contesto: mappaProg[a.progetto_id] || "Progetto", stato: a.stato, note: a.note });
+        ev.push({ id: "pa-"+a.id, titolo: a.descrizione, data: new Date(a.scadenza), ora: a.ora_scadenza || "", origine: "gestione", contesto: mappaProg[a.progetto_id] || "Progetto", stato: a.stato, note: a.note });
       });
       setEventi(ev);
     } catch (e) {
@@ -4320,13 +4356,24 @@ function TabCalendario() {
   // Costruisce un link a Google Calendar con l'evento già compilato (modo semplice).
   const linkGoogleCalendar = (ev) => {
     const d = ev.data;
-    const giorno = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,"0")}${String(d.getDate()).padStart(2,"0")}`;
-    // evento di un giorno intero: dates=AAAAMMGG/AAAAMMGG(+1)
-    const dopo = new Date(d); dopo.setDate(dopo.getDate()+1);
-    const giornoDopo = `${dopo.getFullYear()}${String(dopo.getMonth()+1).padStart(2,"0")}${String(dopo.getDate()).padStart(2,"0")}`;
     const titolo = encodeURIComponent(`${ev.titolo} — ${ev.contesto}`);
     const dettagli = encodeURIComponent(`Scadenza ${ev.origine === "commessa" ? "attività commessa" : "attività gestione"}: ${ev.contesto}${ev.note ? "\nNote: "+ev.note : ""}`);
-    return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${titolo}&dates=${giorno}/${giornoDopo}&details=${dettagli}`;
+    let dates;
+    if (ev.ora && /^\d{1,2}:\d{2}$/.test(ev.ora)) {
+      // Evento con orario: durata 1 ora
+      const [hh, mm] = ev.ora.split(":").map(Number);
+      const inizio = new Date(d); inizio.setHours(hh, mm, 0, 0);
+      const fine = new Date(inizio); fine.setHours(fine.getHours() + 1);
+      const fmt = (x) => `${x.getFullYear()}${String(x.getMonth()+1).padStart(2,"0")}${String(x.getDate()).padStart(2,"0")}T${String(x.getHours()).padStart(2,"0")}${String(x.getMinutes()).padStart(2,"0")}00`;
+      dates = `${fmt(inizio)}/${fmt(fine)}`;
+    } else {
+      // Evento di un giorno intero
+      const giorno = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,"0")}${String(d.getDate()).padStart(2,"0")}`;
+      const dopo = new Date(d); dopo.setDate(dopo.getDate()+1);
+      const giornoDopo = `${dopo.getFullYear()}${String(dopo.getMonth()+1).padStart(2,"0")}${String(dopo.getDate()).padStart(2,"0")}`;
+      dates = `${giorno}/${giornoDopo}`;
+    }
+    return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${titolo}&dates=${dates}&details=${dettagli}`;
   };
 
   const NOMI_MESI = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
@@ -4423,7 +4470,7 @@ function TabCalendario() {
               <span style={{ fontSize:"0.66rem", color:"#fff", background: e.origine==="commessa"?"#1e3a5f":"#422006", borderRadius:99, padding:"2px 8px", whiteSpace:"nowrap" }}>{e.origine==="commessa"?"Commessa":"Gestione"}</span>
               <div style={{ flex:1, minWidth:0 }}>
                 <div style={{ color: e.stato==="FATTO"?"#64748b":"#e2e8f0", fontSize:"0.88rem", fontWeight:600, textDecoration: e.stato==="FATTO"?"line-through":"none" }}>{e.titolo}</div>
-                <div style={{ color:"#64748b", fontSize:"0.74rem" }}>{e.contesto}{e.stato==="FATTO"?" · fatta":""}</div>
+                <div style={{ color:"#64748b", fontSize:"0.74rem" }}>{e.ora ? `🕐 ${e.ora} · ` : ""}{e.contesto}{e.stato==="FATTO"?" · fatta":""}</div>
               </div>
               <a href={linkGoogleCalendar(e)} target="_blank" rel="noopener noreferrer"
                 style={{ background:"#1d4ed8", color:"#fff", borderRadius:6, padding:"5px 12px", fontSize:"0.76rem", fontWeight:700, textDecoration:"none", whiteSpace:"nowrap" }}>
