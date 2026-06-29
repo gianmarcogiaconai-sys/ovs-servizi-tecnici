@@ -3777,12 +3777,14 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
         const esiste = progettiCorrenti.find(p => p.nome.toLowerCase() === nome.toLowerCase());
         if (esiste) return esiste.id;
         const colore = COLORI_PROGETTO[progettiCorrenti.length % COLORI_PROGETTO.length];
-        const { data: nuovoP } = await supabase.from("progetti").insert({ nome, colore }).select().single();
+        const { data: nuovoP, error: errProg } = await supabase.from("progetti").insert({ nome, colore }).select().single();
+        if (errProg) { setErroreVocale("Creazione progetto fallita: " + errProg.message); return null; }
         if (nuovoP) { progettiCorrenti.push(nuovoP); return nuovoP.id; }
         return null;
       };
 
       let contNuove = 0;
+      let erroriInsert = [];
       const nomiNuoviProgetti = new Set();
       for (const n of nuove) {
         if (!n.descrizione || !n.descrizione.trim()) continue;
@@ -3792,8 +3794,8 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
           nomiNuoviProgetti.add(n.nuovo_progetto.trim());
         }
         if (!pid && modalitaVocale === "singolo" && progettoSelezionato) pid = progettoSelezionato;
-        if (!pid) continue; // senza progetto non si può inserire
-        await supabase.from("progetto_attivita").insert({
+        if (!pid) { erroriInsert.push("attività senza progetto valido"); continue; }
+        const { error: errIns } = await supabase.from("progetto_attivita").insert({
           progetto_id: pid,
           descrizione: n.descrizione.trim(),
           stato: "DA FARE",
@@ -3801,10 +3803,14 @@ Rispondi SOLO con un oggetto JSON valido, senza testo prima o dopo, senza backti
           ora_scadenza: n.ora || null,
           note: n.note || null,
         });
-        contNuove++;
+        if (errIns) { erroriInsert.push(errIns.message); }
+        else { contNuove++; }
       }
 
       await carica();
+      if (erroriInsert.length > 0) {
+        setErroreVocale("Alcune attività non sono state salvate: " + erroriInsert.join("; "));
+      }
       setRiepilogoVocale({ fatte: completate.length, nuove: contNuove, nuoviProgetti: Array.from(nomiNuoviProgetti) });
       setRegistrazione("done");
       setTimeout(() => setRegistrazione("idle"), 500);
