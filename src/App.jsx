@@ -1645,9 +1645,12 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
           {form.drive_folder_id ? (
             <div>
               <div style={{ color:"#86efac", fontSize:"0.82rem", marginBottom:10 }}>
-                ✓ Cartella creata su Drive con tutte le sottocartelle pronte.{" "}
-                <a href={`https://drive.google.com/drive/folders/${form.drive_folder_id}`} target="_blank" rel="noreferrer" style={{ color:"#7dd3fc" }}>Apri su Drive →</a>
+                ✓ Cartella creata su Drive con tutte le sottocartelle pronte.
               </div>
+              <a href={`https://drive.google.com/drive/folders/${form.drive_folder_id}`} target="_blank" rel="noreferrer"
+                style={{ display:"inline-flex", alignItems:"center", gap:6, background:"#1e3a5f", color:"#7dd3fc", border:"1px solid #3b82f6", borderRadius:8, padding:"8px 16px", fontWeight:700, fontSize:"0.82rem", textDecoration:"none", marginBottom:12 }}>
+                📁 Apri cartella Drive di questa commessa →
+              </a>
               <div style={{ color:"#64748b", fontSize:"0.78rem", marginBottom:8 }}>
                 Sposta questa commessa nella macro-cartella <strong>{form.tipo==="ristrutturazione"?"RISTRUTTURAZIONI":"APERTURE"}</strong> su Drive (utile per le commesse create prima delle macro-cartelle, o se hai cambiato il tipo).
               </div>
@@ -4642,6 +4645,11 @@ export default function App() {
               <div style={{ color:"#64748b", fontSize:"0.78rem" }}>OVS / UPIM — Servizi Tecnici</div>
             </div>
           <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:8 }}>
+            <a href="https://drive.google.com" target="_blank" rel="noreferrer"
+              title="Apri Google Drive"
+              style={{ background:"#1e3a5f", color:"#7dd3fc", border:"1px solid #3b82f6", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:"0.78rem", fontWeight:700, textDecoration:"none", display:"inline-flex", alignItems:"center", gap:5 }}>
+              📁 Apri Drive
+            </a>
             <button onClick={connettiDrive} disabled={driveConnessione==="connecting"}
               title={driveConnesso ? "Google Drive collegato" : "Collega Google Drive per archiviare i documenti"}
               style={{ background: driveConnesso ? "#14532d" : "#1e293b", color: driveConnesso ? "#86efac" : "#fbbf24", border:`1px solid ${driveConnesso ? "#22c55e55" : "#92400e"}`, borderRadius:8, padding:"6px 14px", cursor: driveConnessione==="connecting" ? "wait" : "pointer", fontSize:"0.78rem", fontWeight:700 }}>
