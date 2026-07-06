@@ -1165,6 +1165,58 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
     e.target.value = "";
   };
 
+  const esportaExcel = async () => {
+    try {
+      const XLSX = await loadSheetJS();
+      const nomeCommessa = commessaSelezionata?.nome || "commessa";
+      const oggi = new Date().toISOString().slice(0,10);
+      const rows = [];
+
+      // Intestazione
+      rows.push(["HP INVESTIMENTO — " + nomeCommessa]);
+      rows.push(["Esportato il: " + new Date().toLocaleString("it-IT")]);
+      rows.push([]);
+      rows.push(["N.", "Voce", "Categoria", "Resp.", "STD (€)", "EXTRA (€)", "TOTALE (€)", "SAL FATTURATO (€)", "SOSPESO (€)", "SAL - Dettaglio"]);
+
+      const cats = [...new Set(BUDGET_VOCI.map(v => v.categoria))];
+      cats.forEach(cat => {
+        const vociCat = BUDGET_VOCI.filter(v => v.categoria === cat);
+        let subStd=0, subExtra=0, subFatt=0;
+        vociCat.forEach(v => {
+          const voce = valori[v.n] || { std:0, extra:0, sal:[] };
+          const std = Number(voce.std) || 0;
+          const extra = Number(voce.extra) || 0;
+          const tot = std + extra;
+          const salList = voce.sal || [];
+          const fatt = salList.reduce((a,s) => a+(Number(s?.importo)||0), 0);
+          const sosp = tot - fatt;
+          const salDettaglio = salList.map((s,i) => `SAL${i+1}: €${s.importo}${s.data?" ("+s.data+")":""}${s.nota?" — "+s.nota:""}`).join(" | ");
+          subStd+=std; subExtra+=extra; subFatt+=fatt;
+          rows.push([v.n, v.voce, v.categoria, v.resp, std||"", extra||"", tot||"", fatt||"", tot>0?sosp:"", salDettaglio]);
+        });
+        const subTot = subStd+subExtra;
+        rows.push(["", "Subtotale " + cat, "", "", subStd||"", subExtra||"", subTot||"", subFatt||"", subTot>0?(subTot-subFatt):"", ""]);
+        rows.push([]);
+      });
+
+      // Totale generale
+      const totStd = BUDGET_VOCI.reduce((a,v)=>a+(Number(valori[v.n]?.std)||0),0);
+      const totExtra = BUDGET_VOCI.reduce((a,v)=>a+(Number(valori[v.n]?.extra)||0),0);
+      const totFatt = BUDGET_VOCI.reduce((a,v)=>a+((valori[v.n]?.sal||[]).reduce((s,x)=>s+(Number(x?.importo)||0),0)),0);
+      const totTot = totStd+totExtra;
+      rows.push(["", "TOTALE GENERALE", "", "", totStd, totExtra, totTot, totFatt, totTot-totFatt, ""]);
+
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      // Larghezze colonne
+      ws["!cols"] = [{wch:6},{wch:40},{wch:22},{wch:12},{wch:14},{wch:14},{wch:14},{wch:18},{wch:14},{wch:60}];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "HP INV");
+      XLSX.writeFile(wb, `HP_INV_${nomeCommessa}_${oggi}.xlsx`);
+    } catch(e) {
+      alert("Errore export Excel: " + e.message);
+    }
+  };
+
   // ── CARICAMENTO DOCUMENTO FORNITORE ──────────────────────────────────────────
   const [docFornitore, setDocFornitore] = useState(null);         // file selezionato
   const [docStato, setDocStato]         = useState("idle");       // idle | analisi | conferma | caricamento | done | error
@@ -1501,10 +1553,14 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
         </table>
       </div>
 
-      <div style={{ marginTop:20, display:"flex", alignItems:"center", gap:12 }}>
+      <div style={{ marginTop:20, display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
         <button onClick={salvaSuSupabase} disabled={salvataggioManuale==="saving"}
           style={{ background:"#1d4ed8", color:"#fff", border:"none", borderRadius:8, padding:"9px 18px", cursor:"pointer", fontWeight:700, fontSize:"0.84rem", opacity: salvataggioManuale==="saving"?0.6:1 }}>
-          {salvataggioManuale==="saving" ? "Salvataggio…" : "💾 Salva modifiche"}
+          {salvataggioManuale==="saving" ? "Salvataggio\u2026" : "\U0001f4be Salva modifiche"}
+        </button>
+        <button onClick={esportaExcel}
+          style={{ background:"#14532d", color:"#86efac", border:"1px solid #22c55e55", borderRadius:8, padding:"9px 18px", cursor:"pointer", fontWeight:700, fontSize:"0.84rem" }}>
+          \U0001f4ca Esporta Excel
         </button>
         {salvataggioManuale==="saved" && <span style={{ color:"#86efac", fontSize:"0.82rem" }}>✓ Salvato</span>}
         {salvataggioManuale==="error" && <span style={{ color:"#fca5a5", fontSize:"0.82rem" }}>Errore durante il salvataggio</span>}
