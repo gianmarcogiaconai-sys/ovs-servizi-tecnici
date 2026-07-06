@@ -1178,7 +1178,9 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
     setDocErrore("");
     setDocAI(null);
     try {
-      // Converti file in base64
+      const apiKey = getStoredApiKey();
+      if (!apiKey) throw new Error("Chiave API Gemini non configurata. Aggiungila nel tab Analisi AI.");
+
       const base64 = await new Promise((res, rej) => {
         const r = new FileReader();
         r.onload = () => res(r.result.split(",")[1]);
@@ -1186,51 +1188,30 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
         r.readAsDataURL(file);
       });
 
-      const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
       const isExcel = file.name.toLowerCase().match(/\.(xlsx|xls)$/);
+      if (isExcel) throw new Error("Per i file Excel, esporta prima in PDF.");
 
-      // Lista voci budget per l'AI
+      const mime = file.type || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/jpeg");
       const vociStr = BUDGET_VOCI.map(v => `${v.n}: ${v.voce} (${v.categoria})`).join("\n");
 
-      let messaggi;
-      if (isPdf) {
-        messaggi = [{
-          role: "user",
-          content: [
-            { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-            { type: "text", text: `Analizza questo documento (preventivo o fattura) e restituisci SOLO un oggetto JSON valido, senza backtick né testo aggiuntivo, con questi campi:
-- "fornitore": ragione sociale del fornitore (stringa)
-- "importo": importo totale IVA inclusa come numero (solo cifre, niente simboli)
-- "voceN": il numero della voce budget più appropriata scegliendo tra queste:\n${vociStr}
-- "voceLabel": la descrizione della voce scelta
-- "nota": breve descrizione del documento (max 60 caratteri)
+      const prompt = `Analizza questo documento (preventivo o fattura) e restituisci SOLO un oggetto JSON valido, senza backtick ne testo aggiuntivo, con questi campi: "fornitore" (ragione sociale), "importo" (numero puro IVA inclusa), "voceN" (numero voce budget tra queste:\n${vociStr}), "voceLabel" (descrizione voce), "nota" (max 60 caratteri). Se non riesci a determinare un campo usa null.`;
 
-Se non riesci a determinare un campo, usa null.` }
-          ]
-        }];
-      } else if (isExcel) {
-        // Per Excel non possiamo inviare il binario direttamente: chiediamo all'utente di usare PDF
-        throw new Error("Per i file Excel, esporta prima in PDF per permettere all'AI di leggerlo correttamente.");
-      } else {
-        messaggi = [{
-          role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type: file.type || "image/jpeg", data: base64 } },
-            { type: "text", text: `Analizza questo documento e restituisci SOLO un oggetto JSON valido con: "fornitore", "importo" (numero), "voceN", "voceLabel", "nota". Voci disponibili:\n${vociStr}` }
-          ]
-        }];
-      }
-
-      const resp = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, messages: messaggi })
-      });
-      const respData = await resp.json();
-      const testo = respData.content?.map(b => b.text || "").join("") || "";
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: [{ parts: [
+            { inline_data: { mime_type: mime, data: base64 } },
+            { text: prompt }
+          ]}] }),
+        }
+      );
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+      const testo = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
       const pulito = testo.replace(/```json|```/g, "").trim();
       const estratto = JSON.parse(pulito);
-
       setDocAI(estratto);
       setDocCorrezione({
         fornitore: estratto.fornitore || "",
