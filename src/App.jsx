@@ -994,15 +994,18 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
   const [salVoceAperta, setSalVoceAperta] = useState(null); // numero voce con pannello SAL aperto
   const [nuovoSal, setNuovoSal] = useState({ importo:"", data:"", nota:"" });
 
-  const aggiungiSal = (n) => {
-    const importo = Number(nuovoSal.importo) || 0;
+  const aggiungiSal = (n, importoDiretto, salDiretto) => {
+    const importo = importoDiretto != null ? Number(importoDiretto) : (Number(nuovoSal.importo) || 0);
     if (importo <= 0) return;
+    const entry = salDiretto
+      ? { importo, data: salDiretto.data || new Date().toISOString().slice(0,10), nota: salDiretto.nota || "" }
+      : { importo, data: nuovoSal.data || new Date().toISOString().slice(0,10), nota: nuovoSal.nota || "" };
     setValori(prev => {
       const voce = prev[n] || { std:0, extra:0, sal:[] };
-      const sal = [...(voce.sal || []), { importo, data: nuovoSal.data || new Date().toISOString().slice(0,10), nota: nuovoSal.nota || "" }];
+      const sal = [...(voce.sal || []), entry];
       return { ...prev, [n]: { ...voce, sal } };
     });
-    setNuovoSal({ importo:"", data:"", nota:"" });
+    if (!importoDiretto) setNuovoSal({ importo:"", data:"", nota:"" });
   };
 
   const rimuoviSal = (n, idx) => {
@@ -1160,6 +1163,143 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
     const file = e.target.files?.[0];
     if (file) importaFile(file);
     e.target.value = "";
+  };
+
+  // ── CARICAMENTO DOCUMENTO FORNITORE ──────────────────────────────────────────
+  const [docFornitore, setDocFornitore] = useState(null);         // file selezionato
+  const [docStato, setDocStato]         = useState("idle");       // idle | analisi | conferma | caricamento | done | error
+  const [docAI, setDocAI]               = useState(null);         // { fornitore, importo, voceN, voceLabel, nota }
+  const [docCorrezione, setDocCorrezione] = useState(null);       // copia modificabile per conferma
+  const [docErrore, setDocErrore]       = useState("");
+  const [docFornitoreNome, setDocFornitoreNome] = useState(""); // nome fornitore per messaggio done
+
+  const analizzaDocumentoFornitore = async (file) => {
+    setDocStato("analisi");
+    setDocErrore("");
+    setDocAI(null);
+    try {
+      // Converti file in base64
+      const base64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result.split(",")[1]);
+        r.onerror = () => rej(new Error("Lettura file fallita"));
+        r.readAsDataURL(file);
+      });
+
+      const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+      const isExcel = file.name.toLowerCase().match(/\.(xlsx|xls)$/);
+
+      // Lista voci budget per l'AI
+      const vociStr = BUDGET_VOCI.map(v => `${v.n}: ${v.voce} (${v.categoria})`).join("\n");
+
+      let messaggi;
+      if (isPdf) {
+        messaggi = [{
+          role: "user",
+          content: [
+            { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
+            { type: "text", text: `Analizza questo documento (preventivo o fattura) e restituisci SOLO un oggetto JSON valido, senza backtick né testo aggiuntivo, con questi campi:
+- "fornitore": ragione sociale del fornitore (stringa)
+- "importo": importo totale IVA inclusa come numero (solo cifre, niente simboli)
+- "voceN": il numero della voce budget più appropriata scegliendo tra queste:\n${vociStr}
+- "voceLabel": la descrizione della voce scelta
+- "nota": breve descrizione del documento (max 60 caratteri)
+
+Se non riesci a determinare un campo, usa null.` }
+          ]
+        }];
+      } else if (isExcel) {
+        // Per Excel non possiamo inviare il binario direttamente: chiediamo all'utente di usare PDF
+        throw new Error("Per i file Excel, esporta prima in PDF per permettere all'AI di leggerlo correttamente.");
+      } else {
+        messaggi = [{
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: file.type || "image/jpeg", data: base64 } },
+            { type: "text", text: `Analizza questo documento e restituisci SOLO un oggetto JSON valido con: "fornitore", "importo" (numero), "voceN", "voceLabel", "nota". Voci disponibili:\n${vociStr}` }
+          ]
+        }];
+      }
+
+      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, messages: messaggi })
+      });
+      const respData = await resp.json();
+      const testo = respData.content?.map(b => b.text || "").join("") || "";
+      const pulito = testo.replace(/```json|```/g, "").trim();
+      const estratto = JSON.parse(pulito);
+
+      setDocAI(estratto);
+      setDocCorrezione({
+        fornitore: estratto.fornitore || "",
+        importo: estratto.importo || "",
+        voceN: estratto.voceN || "",
+        nota: estratto.nota || file.name,
+      });
+      setDocStato("conferma");
+    } catch (e) {
+      setDocErrore(e.message || "Errore durante l'analisi del documento.");
+      setDocStato("error");
+    }
+  };
+
+  const handleDocFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setDocFornitore(file);
+    analizzaDocumentoFornitore(file);
+    e.target.value = "";
+  };
+
+  const confermaSalvaDocumento = async () => {
+    if (!docCorrezione.fornitore || !docCorrezione.importo || !docCorrezione.voceN) {
+      setDocErrore("Compila tutti i campi prima di confermare.");
+      return;
+    }
+    if (!commessaSelezionata?.drive_folder_id) {
+      setDocErrore("Questa commessa non ha ancora una cartella Drive. Creala prima dalla scheda commessa.");
+      return;
+    }
+    setDocStato("caricamento");
+    setDocErrore("");
+    try {
+      // 1. Trova cartella CONTABILITA' nella commessa
+      const idContabilita = await trovaIdSottocartellaDaPercorso(
+        commessaSelezionata.drive_folder_id, "CONTABILITA'"
+      );
+
+      // 2. Trova o crea sottocartella fornitore dentro CONTABILITA'
+      let idFornitore = await trovaSottocartella(docCorrezione.fornitore, idContabilita);
+      if (!idFornitore) {
+        const nuova = await creaCartellaDrive(docCorrezione.fornitore, idContabilita);
+        idFornitore = nuova.id;
+      }
+
+      // 3. Carica il file nella cartella fornitore
+      await caricaFileSuDrive(docFornitore, idFornitore);
+
+      // 4. Aggiungi SAL nella voce budget corretta
+      const importoNum = parseFloat(String(docCorrezione.importo).replace(/[^\d.,]/g, "").replace(",", ".")) || 0;
+      const notaSal = `${docCorrezione.fornitore}${docCorrezione.nota ? " — " + docCorrezione.nota : ""}`;
+      aggiungiSal(docCorrezione.voceN, importoNum, {
+        data: new Date().toISOString().slice(0, 10),
+        nota: notaSal,
+      });
+
+      // 5. Salva subito il budget aggiornato su Supabase
+      setTimeout(() => salvaSuSupabase(), 300);
+
+      setDocStato("done");
+      setDocFornitoreNome(docCorrezione.fornitore || "");
+      setDocFornitore(null);
+      setDocAI(null);
+      setDocCorrezione(null);
+    } catch (e) {
+      setDocErrore(e.message || "Errore durante il caricamento su Drive.");
+      setDocStato("error");
+    }
   };
 
   return (
@@ -1388,6 +1528,81 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
         {salvataggioManuale==="saved" && <span style={{ color:"#86efac", fontSize:"0.82rem" }}>✓ Salvato</span>}
         {salvataggioManuale==="error" && <span style={{ color:"#fca5a5", fontSize:"0.82rem" }}>Errore durante il salvataggio</span>}
       </div>
+
+      {/* ── PANNELLO CARICAMENTO DOCUMENTO FORNITORE ── */}
+      {commessaId && (
+        <div style={{ marginTop:28, background:"#0c1a2e", border:"1px solid #1e3a5f", borderRadius:12, padding:20 }}>
+          <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.95rem", marginBottom:4 }}>📄 Carica documento fornitore</div>
+          <div style={{ color:"#64748b", fontSize:"0.78rem", marginBottom:14 }}>
+            Carica un preventivo o fattura (PDF): l'AI legge il documento, identifica il fornitore e l'importo, registra il SAL sulla voce corretta e archivia il file in <strong style={{color:"#94a3b8"}}>CONTABILITÀ / [Fornitore]</strong> su Drive.
+          </div>
+
+          {docStato === "idle" || docStato === "error" ? (
+            <div>
+              <label style={{ display:"inline-flex", alignItems:"center", gap:8, background:"#1e3a5f", color:"#7dd3fc", border:"1px solid #3b82f6", borderRadius:8, padding:"9px 18px", cursor:"pointer", fontWeight:700, fontSize:"0.84rem" }}>
+                📎 Seleziona documento (PDF)
+                <input type="file" accept=".pdf,image/*" onChange={handleDocFile} style={{ display:"none" }} />
+              </label>
+              {docErrore && <div style={{ color:"#fca5a5", fontSize:"0.8rem", marginTop:10 }}>⚠ {docErrore}</div>}
+            </div>
+          ) : docStato === "analisi" ? (
+            <div style={{ color:"#7dd3fc", fontSize:"0.85rem" }}>🤖 Analisi del documento in corso…</div>
+          ) : docStato === "conferma" ? (
+            <div style={{ background:"#0f172a", border:"1px solid #334155", borderRadius:10, padding:16 }}>
+              <div style={{ color:"#86efac", fontWeight:700, fontSize:"0.85rem", marginBottom:12 }}>✓ Documento analizzato — verifica e conferma</div>
+              <div style={{ display:"grid", gap:10 }}>
+                <div>
+                  <label style={{ color:"#64748b", fontSize:"0.75rem", display:"block", marginBottom:3 }}>Fornitore</label>
+                  <input value={docCorrezione.fornitore} onChange={e => setDocCorrezione(p=>({...p, fornitore:e.target.value}))}
+                    style={{ width:"100%", background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:6, padding:"7px 10px", fontSize:"0.85rem", boxSizing:"border-box" }} />
+                </div>
+                <div>
+                  <label style={{ color:"#64748b", fontSize:"0.75rem", display:"block", marginBottom:3 }}>Importo (€ IVA inclusa)</label>
+                  <input type="number" value={docCorrezione.importo} onChange={e => setDocCorrezione(p=>({...p, importo:e.target.value}))}
+                    style={{ width:"100%", background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:6, padding:"7px 10px", fontSize:"0.85rem", boxSizing:"border-box" }} />
+                </div>
+                <div>
+                  <label style={{ color:"#64748b", fontSize:"0.75rem", display:"block", marginBottom:3 }}>Voce budget HP INV</label>
+                  <select value={docCorrezione.voceN} onChange={e => setDocCorrezione(p=>({...p, voceN:e.target.value}))}
+                    style={{ width:"100%", background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:6, padding:"7px 10px", fontSize:"0.85rem", boxSizing:"border-box" }}>
+                    <option value="">— Seleziona voce —</option>
+                    {BUDGET_VOCI.map(v => (
+                      <option key={v.n} value={v.n}>{v.n} — {v.voce}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ color:"#64748b", fontSize:"0.75rem", display:"block", marginBottom:3 }}>Nota SAL (opzionale)</label>
+                  <input value={docCorrezione.nota} onChange={e => setDocCorrezione(p=>({...p, nota:e.target.value}))}
+                    style={{ width:"100%", background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:6, padding:"7px 10px", fontSize:"0.85rem", boxSizing:"border-box" }} />
+                </div>
+              </div>
+              {docErrore && <div style={{ color:"#fca5a5", fontSize:"0.8rem", marginTop:10 }}>⚠ {docErrore}</div>}
+              <div style={{ display:"flex", gap:10, marginTop:14 }}>
+                <button onClick={confermaSalvaDocumento}
+                  style={{ background:"#15803d", color:"#fff", border:"none", borderRadius:8, padding:"9px 20px", cursor:"pointer", fontWeight:700, fontSize:"0.84rem" }}>
+                  ✓ Conferma e carica su Drive
+                </button>
+                <button onClick={() => { setDocStato("idle"); setDocFornitore(null); setDocAI(null); setDocCorrezione(null); setDocErrore(""); }}
+                  style={{ background:"#1e293b", color:"#94a3b8", border:"1px solid #334155", borderRadius:8, padding:"9px 16px", cursor:"pointer", fontSize:"0.84rem" }}>
+                  Annulla
+                </button>
+              </div>
+            </div>
+          ) : docStato === "caricamento" ? (
+            <div style={{ color:"#7dd3fc", fontSize:"0.85rem" }}>⬆ Caricamento su Drive e registrazione SAL in corso…</div>
+          ) : docStato === "done" ? (
+            <div>
+              <div style={{ color:"#86efac", fontSize:"0.85rem", marginBottom:10 }}>✓ Documento archiviato in CONTABILITÀ/{docFornitoreNome} e SAL registrato sul budget.</div>
+              <button onClick={() => setDocStato("idle")}
+                style={{ background:"#1e3a5f", color:"#7dd3fc", border:"1px solid #3b82f6", borderRadius:8, padding:"7px 16px", cursor:"pointer", fontWeight:700, fontSize:"0.82rem" }}>
+                + Carica un altro documento
+              </button>
+            </div>
+          ) : null}
+        </div>
+      )}
+      
       </>
       )}
     </div>
@@ -1645,12 +1860,9 @@ function TabScheda({ commessaIdGlobale, onCambiaCommessa, commesse, onCommessaSa
           {form.drive_folder_id ? (
             <div>
               <div style={{ color:"#86efac", fontSize:"0.82rem", marginBottom:10 }}>
-                ✓ Cartella creata su Drive con tutte le sottocartelle pronte.
+                ✓ Cartella creata su Drive con tutte le sottocartelle pronte.{" "}
+                <a href={`https://drive.google.com/drive/folders/${form.drive_folder_id}`} target="_blank" rel="noreferrer" style={{ color:"#7dd3fc" }}>Apri su Drive →</a>
               </div>
-              <a href={`https://drive.google.com/drive/folders/${form.drive_folder_id}`} target="_blank" rel="noreferrer"
-                style={{ display:"inline-flex", alignItems:"center", gap:6, background:"#1e3a5f", color:"#7dd3fc", border:"1px solid #3b82f6", borderRadius:8, padding:"8px 16px", fontWeight:700, fontSize:"0.82rem", textDecoration:"none", marginBottom:12 }}>
-                📁 Apri cartella Drive di questa commessa →
-              </a>
               <div style={{ color:"#64748b", fontSize:"0.78rem", marginBottom:8 }}>
                 Sposta questa commessa nella macro-cartella <strong>{form.tipo==="ristrutturazione"?"RISTRUTTURAZIONI":"APERTURE"}</strong> su Drive (utile per le commesse create prima delle macro-cartelle, o se hai cambiato il tipo).
               </div>
@@ -4645,11 +4857,6 @@ export default function App() {
               <div style={{ color:"#64748b", fontSize:"0.78rem" }}>OVS / UPIM — Servizi Tecnici</div>
             </div>
           <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:8 }}>
-            <a href="https://drive.google.com" target="_blank" rel="noreferrer"
-              title="Apri Google Drive"
-              style={{ background:"#1e3a5f", color:"#7dd3fc", border:"1px solid #3b82f6", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:"0.78rem", fontWeight:700, textDecoration:"none", display:"inline-flex", alignItems:"center", gap:5 }}>
-              📁 Apri Drive
-            </a>
             <button onClick={connettiDrive} disabled={driveConnessione==="connecting"}
               title={driveConnesso ? "Google Drive collegato" : "Collega Google Drive per archiviare i documenti"}
               style={{ background: driveConnesso ? "#14532d" : "#1e293b", color: driveConnesso ? "#86efac" : "#fbbf24", border:`1px solid ${driveConnesso ? "#22c55e55" : "#92400e"}`, borderRadius:8, padding:"6px 14px", cursor: driveConnessione==="connecting" ? "wait" : "pointer", fontSize:"0.78rem", fontWeight:700 }}>
