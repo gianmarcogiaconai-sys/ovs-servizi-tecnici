@@ -1197,7 +1197,7 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
       const prompt = `Analizza questo documento (preventivo o fattura) e restituisci SOLO un oggetto JSON valido, senza backtick ne testo aggiuntivo, con questi campi: "fornitore" (ragione sociale), "importo" (numero puro IVA inclusa), "voceN" (numero voce budget tra queste:\n${vociStr}), "voceLabel" (descrizione voce), "nota" (max 60 caratteri). Se non riesci a determinare un campo usa null.`;
 
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
