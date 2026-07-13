@@ -994,18 +994,15 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
   const [salVoceAperta, setSalVoceAperta] = useState(null); // numero voce con pannello SAL aperto
   const [nuovoSal, setNuovoSal] = useState({ importo:"", data:"", nota:"" });
 
-  const aggiungiSal = (n, importoDiretto, salDiretto) => {
-    const importo = importoDiretto != null ? Number(importoDiretto) : (Number(nuovoSal.importo) || 0);
+  const aggiungiSal = (n) => {
+    const importo = Number(nuovoSal.importo) || 0;
     if (importo <= 0) return;
-    const entry = salDiretto
-      ? { importo, data: salDiretto.data || new Date().toISOString().slice(0,10), nota: salDiretto.nota || "" }
-      : { importo, data: nuovoSal.data || new Date().toISOString().slice(0,10), nota: nuovoSal.nota || "" };
     setValori(prev => {
       const voce = prev[n] || { std:0, extra:0, sal:[] };
-      const sal = [...(voce.sal || []), entry];
+      const sal = [...(voce.sal || []), { importo, data: nuovoSal.data || new Date().toISOString().slice(0,10), nota: nuovoSal.nota || "" }];
       return { ...prev, [n]: { ...voce, sal } };
     });
-    if (!importoDiretto) setNuovoSal({ importo:"", data:"", nota:"" });
+    setNuovoSal({ importo:"", data:"", nota:"" });
   };
 
   const rimuoviSal = (n, idx) => {
@@ -1163,176 +1160,6 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
     const file = e.target.files?.[0];
     if (file) importaFile(file);
     e.target.value = "";
-  };
-
-  const esportaExcel = async () => {
-    try {
-      const XLSX = await loadSheetJS();
-      const nomeCommessa = commessaSelezionata?.nome || "commessa";
-      const oggi = new Date().toISOString().slice(0,10);
-      const rows = [];
-
-      // Intestazione
-      rows.push(["HP INVESTIMENTO — " + nomeCommessa]);
-      rows.push(["Esportato il: " + new Date().toLocaleString("it-IT")]);
-      rows.push([]);
-      rows.push(["N.", "Voce", "Categoria", "Resp.", "STD (€)", "EXTRA (€)", "TOTALE (€)", "SAL FATTURATO (€)", "SOSPESO (€)", "SAL - Dettaglio"]);
-
-      const cats = [...new Set(BUDGET_VOCI.map(v => v.categoria))];
-      cats.forEach(cat => {
-        const vociCat = BUDGET_VOCI.filter(v => v.categoria === cat);
-        let subStd=0, subExtra=0, subFatt=0;
-        vociCat.forEach(v => {
-          const voce = valori[v.n] || { std:0, extra:0, sal:[] };
-          const std = Number(voce.std) || 0;
-          const extra = Number(voce.extra) || 0;
-          const tot = std + extra;
-          const salList = voce.sal || [];
-          const fatt = salList.reduce((a,s) => a+(Number(s?.importo)||0), 0);
-          const sosp = tot - fatt;
-          const salDettaglio = salList.map((s,i) => `SAL${i+1}: €${s.importo}${s.data?" ("+s.data+")":""}${s.nota?" — "+s.nota:""}`).join(" | ");
-          subStd+=std; subExtra+=extra; subFatt+=fatt;
-          rows.push([v.n, v.voce, v.categoria, v.resp, std||"", extra||"", tot||"", fatt||"", tot>0?sosp:"", salDettaglio]);
-        });
-        const subTot = subStd+subExtra;
-        rows.push(["", "Subtotale " + cat, "", "", subStd||"", subExtra||"", subTot||"", subFatt||"", subTot>0?(subTot-subFatt):"", ""]);
-        rows.push([]);
-      });
-
-      // Totale generale
-      const totStd = BUDGET_VOCI.reduce((a,v)=>a+(Number(valori[v.n]?.std)||0),0);
-      const totExtra = BUDGET_VOCI.reduce((a,v)=>a+(Number(valori[v.n]?.extra)||0),0);
-      const totFatt = BUDGET_VOCI.reduce((a,v)=>a+((valori[v.n]?.sal||[]).reduce((s,x)=>s+(Number(x?.importo)||0),0)),0);
-      const totTot = totStd+totExtra;
-      rows.push(["", "TOTALE GENERALE", "", "", totStd, totExtra, totTot, totFatt, totTot-totFatt, ""]);
-
-      const ws = XLSX.utils.aoa_to_sheet(rows);
-      // Larghezze colonne
-      ws["!cols"] = [{wch:6},{wch:40},{wch:22},{wch:12},{wch:14},{wch:14},{wch:14},{wch:18},{wch:14},{wch:60}];
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "HP INV");
-      XLSX.writeFile(wb, `HP_INV_${nomeCommessa}_${oggi}.xlsx`);
-    } catch(e) {
-      alert("Errore export Excel: " + e.message);
-    }
-  };
-
-  // ── CARICAMENTO DOCUMENTO FORNITORE ──────────────────────────────────────────
-  const [docFornitore, setDocFornitore] = useState(null);         // file selezionato
-  const [docStato, setDocStato]         = useState("idle");       // idle | analisi | conferma | caricamento | done | error
-  const [docAI, setDocAI]               = useState(null);         // { fornitore, importo, voceN, voceLabel, nota }
-  const [docCorrezione, setDocCorrezione] = useState(null);       // copia modificabile per conferma
-  const [docErrore, setDocErrore]       = useState("");
-  const [docFornitoreNome, setDocFornitoreNome] = useState(""); // nome fornitore per messaggio done
-
-  const analizzaDocumentoFornitore = async (file) => {
-    setDocStato("analisi");
-    setDocErrore("");
-    setDocAI(null);
-    try {
-      const apiKey = getStoredApiKey();
-      if (!apiKey) throw new Error("Chiave API Gemini non configurata. Aggiungila nel tab Analisi AI.");
-
-      const base64 = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(r.result.split(",")[1]);
-        r.onerror = () => rej(new Error("Lettura file fallita"));
-        r.readAsDataURL(file);
-      });
-
-      const isExcel = file.name.toLowerCase().match(/\.(xlsx|xls)$/);
-      if (isExcel) throw new Error("Per i file Excel, esporta prima in PDF.");
-
-      const mime = file.type || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/jpeg");
-      const vociStr = BUDGET_VOCI.map(v => `${v.n}: ${v.voce} (${v.categoria})`).join("\n");
-
-      const prompt = `Analizza questo documento (preventivo o fattura) e restituisci SOLO un oggetto JSON valido, senza backtick ne testo aggiuntivo, con questi campi: "fornitore" (ragione sociale), "importo" (numero puro IVA inclusa), "voceN" (numero voce budget tra queste:\n${vociStr}), "voceLabel" (descrizione voce), "nota" (max 60 caratteri). Se non riesci a determinare un campo usa null.`;
-
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${apiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contents: [{ parts: [
-            { inline_data: { mime_type: mime, data: base64 } },
-            { text: prompt }
-          ]}] }),
-        }
-      );
-      const data = await res.json();
-      if (data.error) throw new Error(data.error.message);
-      const testo = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      const pulito = testo.replace(/```json|```/g, "").trim();
-      const estratto = JSON.parse(pulito);
-      setDocAI(estratto);
-      setDocCorrezione({
-        fornitore: estratto.fornitore || "",
-        importo: estratto.importo || "",
-        voceN: estratto.voceN || "",
-        nota: estratto.nota || file.name,
-      });
-      setDocStato("conferma");
-    } catch (e) {
-      setDocErrore(e.message || "Errore durante l'analisi del documento.");
-      setDocStato("error");
-    }
-  };
-
-  const handleDocFile = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setDocFornitore(file);
-    analizzaDocumentoFornitore(file);
-    e.target.value = "";
-  };
-
-  const confermaSalvaDocumento = async () => {
-    if (!docCorrezione.fornitore || !docCorrezione.importo || !docCorrezione.voceN) {
-      setDocErrore("Compila tutti i campi prima di confermare.");
-      return;
-    }
-    if (!commessaSelezionata?.drive_folder_id) {
-      setDocErrore("Questa commessa non ha ancora una cartella Drive. Creala prima dalla scheda commessa.");
-      return;
-    }
-    setDocStato("caricamento");
-    setDocErrore("");
-    try {
-      // 1. Trova cartella CONTABILITA' nella commessa
-      const idContabilita = await trovaIdSottocartellaDaPercorso(
-        commessaSelezionata.drive_folder_id, "CONTABILITA'"
-      );
-
-      // 2. Trova o crea sottocartella fornitore dentro CONTABILITA'
-      let idFornitore = await trovaSottocartella(docCorrezione.fornitore, idContabilita);
-      if (!idFornitore) {
-        const nuova = await creaCartellaDrive(docCorrezione.fornitore, idContabilita);
-        idFornitore = nuova.id;
-      }
-
-      // 3. Carica il file nella cartella fornitore
-      await caricaFileSuDrive(docFornitore, idFornitore);
-
-      // 4. Aggiungi SAL nella voce budget corretta
-      const importoNum = parseFloat(String(docCorrezione.importo).replace(/[^\d.,]/g, "").replace(",", ".")) || 0;
-      const notaSal = `${docCorrezione.fornitore}${docCorrezione.nota ? " — " + docCorrezione.nota : ""}`;
-      aggiungiSal(docCorrezione.voceN, importoNum, {
-        data: new Date().toISOString().slice(0, 10),
-        nota: notaSal,
-      });
-
-      // 5. Salva subito il budget aggiornato su Supabase
-      setTimeout(() => salvaSuSupabase(), 300);
-
-      setDocStato("done");
-      setDocFornitoreNome(docCorrezione.fornitore || "");
-      setDocFornitore(null);
-      setDocAI(null);
-      setDocCorrezione(null);
-    } catch (e) {
-      setDocErrore(e.message || "Errore durante il caricamento su Drive.");
-      setDocStato("error");
-    }
   };
 
   return (
@@ -1553,93 +1380,14 @@ function TabBudget({ commessaIdGlobale, commesse, commessaSelezionata }) {
         </table>
       </div>
 
-      <div style={{ marginTop:20, display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+      <div style={{ marginTop:20, display:"flex", alignItems:"center", gap:12 }}>
         <button onClick={salvaSuSupabase} disabled={salvataggioManuale==="saving"}
           style={{ background:"#1d4ed8", color:"#fff", border:"none", borderRadius:8, padding:"9px 18px", cursor:"pointer", fontWeight:700, fontSize:"0.84rem", opacity: salvataggioManuale==="saving"?0.6:1 }}>
-          {salvataggioManuale==="saving" ? "Salvataggio\u2026" : "\U0001f4be Salva modifiche"}
-        </button>
-        <button onClick={esportaExcel}
-          style={{ background:"#14532d", color:"#86efac", border:"1px solid #22c55e55", borderRadius:8, padding:"9px 18px", cursor:"pointer", fontWeight:700, fontSize:"0.84rem" }}>
-          \U0001f4ca Esporta Excel
+          {salvataggioManuale==="saving" ? "Salvataggio…" : "💾 Salva modifiche"}
         </button>
         {salvataggioManuale==="saved" && <span style={{ color:"#86efac", fontSize:"0.82rem" }}>✓ Salvato</span>}
         {salvataggioManuale==="error" && <span style={{ color:"#fca5a5", fontSize:"0.82rem" }}>Errore durante il salvataggio</span>}
       </div>
-
-      {/* ── PANNELLO CARICAMENTO DOCUMENTO FORNITORE ── */}
-      {commessaId && (
-        <div style={{ marginTop:28, background:"#0c1a2e", border:"1px solid #1e3a5f", borderRadius:12, padding:20 }}>
-          <div style={{ color:"#7dd3fc", fontWeight:700, fontSize:"0.95rem", marginBottom:4 }}>📄 Carica documento fornitore</div>
-          <div style={{ color:"#64748b", fontSize:"0.78rem", marginBottom:14 }}>
-            Carica un preventivo o fattura (PDF): l'AI legge il documento, identifica il fornitore e l'importo, registra il SAL sulla voce corretta e archivia il file in <strong style={{color:"#94a3b8"}}>CONTABILITÀ / [Fornitore]</strong> su Drive.
-          </div>
-
-          {docStato === "idle" || docStato === "error" ? (
-            <div>
-              <label style={{ display:"inline-flex", alignItems:"center", gap:8, background:"#1e3a5f", color:"#7dd3fc", border:"1px solid #3b82f6", borderRadius:8, padding:"9px 18px", cursor:"pointer", fontWeight:700, fontSize:"0.84rem" }}>
-                📎 Seleziona documento (PDF)
-                <input type="file" accept=".pdf,image/*" onChange={handleDocFile} style={{ display:"none" }} />
-              </label>
-              {docErrore && <div style={{ color:"#fca5a5", fontSize:"0.8rem", marginTop:10 }}>⚠ {docErrore}</div>}
-            </div>
-          ) : docStato === "analisi" ? (
-            <div style={{ color:"#7dd3fc", fontSize:"0.85rem" }}>🤖 Analisi del documento in corso…</div>
-          ) : docStato === "conferma" ? (
-            <div style={{ background:"#0f172a", border:"1px solid #334155", borderRadius:10, padding:16 }}>
-              <div style={{ color:"#86efac", fontWeight:700, fontSize:"0.85rem", marginBottom:12 }}>✓ Documento analizzato — verifica e conferma</div>
-              <div style={{ display:"grid", gap:10 }}>
-                <div>
-                  <label style={{ color:"#64748b", fontSize:"0.75rem", display:"block", marginBottom:3 }}>Fornitore</label>
-                  <input value={docCorrezione.fornitore} onChange={e => setDocCorrezione(p=>({...p, fornitore:e.target.value}))}
-                    style={{ width:"100%", background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:6, padding:"7px 10px", fontSize:"0.85rem", boxSizing:"border-box" }} />
-                </div>
-                <div>
-                  <label style={{ color:"#64748b", fontSize:"0.75rem", display:"block", marginBottom:3 }}>Importo (€ IVA inclusa)</label>
-                  <input type="number" value={docCorrezione.importo} onChange={e => setDocCorrezione(p=>({...p, importo:e.target.value}))}
-                    style={{ width:"100%", background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:6, padding:"7px 10px", fontSize:"0.85rem", boxSizing:"border-box" }} />
-                </div>
-                <div>
-                  <label style={{ color:"#64748b", fontSize:"0.75rem", display:"block", marginBottom:3 }}>Voce budget HP INV</label>
-                  <select value={docCorrezione.voceN} onChange={e => setDocCorrezione(p=>({...p, voceN:e.target.value}))}
-                    style={{ width:"100%", background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:6, padding:"7px 10px", fontSize:"0.85rem", boxSizing:"border-box" }}>
-                    <option value="">— Seleziona voce —</option>
-                    {BUDGET_VOCI.map(v => (
-                      <option key={v.n} value={v.n}>{v.n} — {v.voce}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label style={{ color:"#64748b", fontSize:"0.75rem", display:"block", marginBottom:3 }}>Nota SAL (opzionale)</label>
-                  <input value={docCorrezione.nota} onChange={e => setDocCorrezione(p=>({...p, nota:e.target.value}))}
-                    style={{ width:"100%", background:"#1e293b", color:"#e2e8f0", border:"1px solid #334155", borderRadius:6, padding:"7px 10px", fontSize:"0.85rem", boxSizing:"border-box" }} />
-                </div>
-              </div>
-              {docErrore && <div style={{ color:"#fca5a5", fontSize:"0.8rem", marginTop:10 }}>⚠ {docErrore}</div>}
-              <div style={{ display:"flex", gap:10, marginTop:14 }}>
-                <button onClick={confermaSalvaDocumento}
-                  style={{ background:"#15803d", color:"#fff", border:"none", borderRadius:8, padding:"9px 20px", cursor:"pointer", fontWeight:700, fontSize:"0.84rem" }}>
-                  ✓ Conferma e carica su Drive
-                </button>
-                <button onClick={() => { setDocStato("idle"); setDocFornitore(null); setDocAI(null); setDocCorrezione(null); setDocErrore(""); }}
-                  style={{ background:"#1e293b", color:"#94a3b8", border:"1px solid #334155", borderRadius:8, padding:"9px 16px", cursor:"pointer", fontSize:"0.84rem" }}>
-                  Annulla
-                </button>
-              </div>
-            </div>
-          ) : docStato === "caricamento" ? (
-            <div style={{ color:"#7dd3fc", fontSize:"0.85rem" }}>⬆ Caricamento su Drive e registrazione SAL in corso…</div>
-          ) : docStato === "done" ? (
-            <div>
-              <div style={{ color:"#86efac", fontSize:"0.85rem", marginBottom:10 }}>✓ Documento archiviato in CONTABILITÀ/{docFornitoreNome} e SAL registrato sul budget.</div>
-              <button onClick={() => setDocStato("idle")}
-                style={{ background:"#1e3a5f", color:"#7dd3fc", border:"1px solid #3b82f6", borderRadius:8, padding:"7px 16px", cursor:"pointer", fontWeight:700, fontSize:"0.82rem" }}>
-                + Carica un altro documento
-              </button>
-            </div>
-          ) : null}
-        </div>
-      )}
-      
       </>
       )}
     </div>
@@ -4753,6 +4501,352 @@ function TabCalendario() {
   );
 }
 
+
+// ── TAB SOPRALLUOGO ───────────────────────────────────────────────────────────
+function TabSopralluogo({ commessaIdGlobale, commessaSelezionata }) {
+  const [planimetria, setPlanimetria]       = useState(null);   // { file, url, tipo }
+  const [media, setMedia]                   = useState(null);   // { file, tipo: "video"|"audio" }
+  const [stato, setStato]                   = useState("idle"); // idle|trascrizione|analisi|pronto|export
+  const [errore, setErrore]                 = useState("");
+  const [commenti, setCommenti]             = useState([]);     // [{ id, testo, area, x, y }]
+  const [pinAttivo, setPinAttivo]           = useState(null);   // id commento da posizionare
+  const [mostraPin, setMostraPin]           = useState(true);
+  const planRef                             = React.useRef(null);
+
+  // Carica planimetria
+  const handlePlanimetria = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const tipo = file.type === "application/pdf" ? "pdf" : "immagine";
+    setPlanimetria({ file, url, tipo });
+    e.target.value = "";
+  };
+
+  // Carica video o audio
+  const handleMedia = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const tipo = file.type.startsWith("video") ? "video" : "audio";
+    setMedia({ file, tipo });
+    e.target.value = "";
+  };
+
+  // Analisi AI: trascrive e organizza i commenti
+  const analizzaConAI = async () => {
+    const apiKey = getStoredApiKey();
+    if (!apiKey) { setErrore("Chiave API Gemini non configurata. Vai nel tab Analisi AI."); return; }
+    if (!media) { setErrore("Carica prima un video o audio del sopralluogo."); return; }
+    setStato("trascrizione");
+    setErrore("");
+    try {
+      // Converti media in base64
+      const base64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result.split(",")[1]);
+        r.onerror = () => rej(new Error("Lettura file fallita"));
+        r.readAsDataURL(media.file);
+      });
+
+      const mime = media.file.type || "audio/mp4";
+
+      const prompt = `Sei un assistente per la gestione di negozi retail. Ti viene fornita una registrazione audio/video di un sopralluogo in un punto vendita.
+
+Trascrivi tutti i commenti e organizzali in una lista strutturata. Per ogni commento identifica:
+- Il testo del commento (trascritto fedelmente)
+- L'area del negozio a cui si riferisce (es: Ingresso, Cassa, Reparto abbigliamento donna, Magazzino, Vetrine, Area camerini, ecc.)
+- La priorità (alta/media/bassa) basandoti sul tono e contenuto
+
+Restituisci SOLO un array JSON valido, senza backtick né testo aggiuntivo, con questa struttura:
+[
+  { "id": 1, "testo": "commento trascritto", "area": "nome area", "priorita": "alta|media|bassa" },
+  ...
+]
+
+Se non riesci a trascrivere chiaramente un commento, includilo comunque con una nota "[non chiaro]".`;
+
+      setStato("analisi");
+
+      const res = await fetch(
+        \`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=\${apiKey}\`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: [{ parts: [
+            { inline_data: { mime_type: mime, data: base64 } },
+            { text: prompt }
+          ]}] })
+        }
+      );
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+      const testo = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      const pulito = testo.replace(/```json|```/g, "").trim();
+      const lista = JSON.parse(pulito);
+      // Aggiungi x,y null (da posizionare manualmente)
+      setCommenti(lista.map(c => ({ ...c, x: null, y: null })));
+      setStato("pronto");
+    } catch(e) {
+      setErrore(e.message || "Errore durante l'analisi.");
+      setStato("idle");
+    }
+  };
+
+  // Click sulla planimetria per posizionare pin
+  const handleClickPlanimetria = (e) => {
+    if (!pinAttivo) return;
+    const rect = planRef.current.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width * 100).toFixed(1);
+    const y = ((e.clientY - rect.top) / rect.height * 100).toFixed(1);
+    setCommenti(prev => prev.map(c => c.id === pinAttivo ? { ...c, x: parseFloat(x), y: parseFloat(y) } : c));
+    setPinAttivo(null);
+  };
+
+  // Colore priorità
+  const colPriorita = (p) => p === "alta" ? "#ef4444" : p === "media" ? "#f59e0b" : "#22c55e";
+
+  // Export PDF
+  const exportPDF = async () => {
+    setStato("export");
+    try {
+      // Crea canvas con planimetria + pin
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+
+      if (planimetria && planimetria.tipo === "immagine") {
+        const img = new Image();
+        img.src = planimetria.url;
+        await new Promise(r => { img.onload = r; });
+        canvas.width = img.width;
+        canvas.height = img.height;
+        ctx.drawImage(img, 0, 0);
+
+        // Disegna pin
+        commenti.filter(c => c.x !== null).forEach(c => {
+          const px = c.x / 100 * canvas.width;
+          const py = c.y / 100 * canvas.height;
+          ctx.beginPath();
+          ctx.arc(px, py, 16, 0, 2 * Math.PI);
+          ctx.fillStyle = colPriorita(c.priorita);
+          ctx.fill();
+          ctx.fillStyle = "#fff";
+          ctx.font = "bold 14px Arial";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(String(c.id), px, py);
+        });
+      }
+
+      // Genera HTML per il report
+      const planImg = canvas.width > 0 ? canvas.toDataURL("image/png") : null;
+      const html = \`<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>Sopralluogo - \${commessaSelezionata?.nome || "Commessa"}</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 32px; color: #1e293b; }
+  h1 { color: #1d4ed8; font-size: 22px; margin-bottom: 4px; }
+  h2 { color: #475569; font-size: 14px; font-weight: normal; margin-bottom: 24px; }
+  .planimetria { max-width: 100%; margin-bottom: 32px; border: 1px solid #e2e8f0; border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+  th { background: #1d4ed8; color: #fff; padding: 10px 12px; text-align: left; font-size: 13px; }
+  td { padding: 10px 12px; border-bottom: 1px solid #e2e8f0; font-size: 13px; vertical-align: top; }
+  tr:nth-child(even) td { background: #f8fafc; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 11px; font-weight: bold; color: #fff; }
+  .alta { background: #ef4444; } .media { background: #f59e0b; } .bassa { background: #22c55e; }
+  .pin { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; color: #fff; font-weight: bold; font-size: 12px; }
+</style></head><body>
+<h1>📋 Report Sopralluogo — \${commessaSelezionata?.nome || "Commessa"}</h1>
+<h2>Generato il \${new Date().toLocaleString("it-IT")} · \${commenti.length} commenti rilevati</h2>
+\${planImg ? \`<img src="\${planImg}" class="planimetria" />\` : ""}
+<table>
+<thead><tr><th>#</th><th>Area</th><th>Commento</th><th>Priorità</th><th>Pin</th></tr></thead>
+<tbody>
+\${commenti.map(c => \`<tr>
+  <td><span class="pin" style="background:\${colPriorita(c.priorita)}">\${c.id}</span></td>
+  <td><strong>\${c.area}</strong></td>
+  <td>\${c.testo}</td>
+  <td><span class="badge \${c.priorita}">\${c.priorita.toUpperCase()}</span></td>
+  <td>\${c.x !== null ? \`(\${c.x}%, \${c.y}%)\` : "—"}</td>
+</tr>\`).join("")}
+</tbody></table>
+</body></html>\`;
+
+      const blob = new Blob([html], { type: "text/html" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = \`Sopralluogo_\${commessaSelezionata?.nome || "commessa"}_\${new Date().toISOString().slice(0,10)}.html\`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setStato("pronto");
+    } catch(e) {
+      setErrore("Errore export: " + e.message);
+      setStato("pronto");
+    }
+  };
+
+  const coloreArea = (area) => {
+    const c = { "Ingresso": "#6366f1", "Cassa": "#f59e0b", "Magazzino": "#8b5cf6" };
+    return c[area] || "#3b82f6";
+  };
+
+  return (
+    <div style={{ color: "#e2e8f0" }}>
+      <div style={{ marginBottom: 24 }}>
+        <h2 style={{ color: "#7dd3fc", fontWeight: 700, fontSize: "1.1rem", margin: 0 }}>🏪 Sopralluogo Negozio</h2>
+        <p style={{ color: "#64748b", fontSize: "0.82rem", marginTop: 4 }}>
+          Carica la planimetria e una registrazione del sopralluogo. L'AI trascrive i commenti e li organizza per area — poi puoi posizionarli sulla planimetria e scaricare il report.
+        </p>
+      </div>
+
+      {/* ROW: planimetria + media */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 20 }}>
+        {/* PLANIMETRIA */}
+        <div style={{ background: "#0c1a2e", border: "1px solid #1e3a5f", borderRadius: 12, padding: 16 }}>
+          <div style={{ color: "#7dd3fc", fontWeight: 700, fontSize: "0.88rem", marginBottom: 10 }}>📐 Planimetria</div>
+          {!planimetria ? (
+            <label style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: 120, border: "2px dashed #1e3a5f", borderRadius: 8, cursor: "pointer", color: "#475569", fontSize: "0.82rem", gap: 6 }}>
+              <span style={{ fontSize: "2rem" }}>🗺</span>
+              Carica planimetria (PDF o immagine)
+              <input type="file" accept="image/*,.pdf" onChange={handlePlanimetria} style={{ display: "none" }} />
+            </label>
+          ) : (
+            <div>
+              <div style={{ color: "#86efac", fontSize: "0.78rem", marginBottom: 6 }}>✓ {planimetria.file.name}</div>
+              <button onClick={() => setPlanimetria(null)} style={{ background: "none", border: "none", color: "#94a3b8", fontSize: "0.75rem", cursor: "pointer" }}>× Rimuovi</button>
+            </div>
+          )}
+        </div>
+
+        {/* MEDIA */}
+        <div style={{ background: "#0c1a2e", border: "1px solid #1e3a5f", borderRadius: 12, padding: 16 }}>
+          <div style={{ color: "#7dd3fc", fontWeight: 700, fontSize: "0.88rem", marginBottom: 10 }}>🎥 Video / Audio sopralluogo</div>
+          {!media ? (
+            <label style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: 120, border: "2px dashed #1e3a5f", borderRadius: 8, cursor: "pointer", color: "#475569", fontSize: "0.82rem", gap: 6 }}>
+              <span style={{ fontSize: "2rem" }}>🎙</span>
+              Carica video o audio
+              <input type="file" accept="video/*,audio/*" onChange={handleMedia} style={{ display: "none" }} />
+            </label>
+          ) : (
+            <div>
+              <div style={{ color: "#86efac", fontSize: "0.78rem", marginBottom: 6 }}>✓ {media.file.name} ({media.tipo})</div>
+              {media.tipo === "audio"
+                ? <audio controls src={URL.createObjectURL(media.file)} style={{ width: "100%", marginTop: 6 }} />
+                : <video controls src={URL.createObjectURL(media.file)} style={{ width: "100%", maxHeight: 120, marginTop: 6 }} />
+              }
+              <button onClick={() => setMedia(null)} style={{ background: "none", border: "none", color: "#94a3b8", fontSize: "0.75rem", cursor: "pointer", marginTop: 4 }}>× Rimuovi</button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* BOTTONE ANALISI */}
+      {stato === "idle" || stato === "pronto" ? (
+        <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
+          <button onClick={analizzaConAI} disabled={!media}
+            style={{ background: media ? "#1d4ed8" : "#1e293b", color: media ? "#fff" : "#475569", border: "none", borderRadius: 8, padding: "10px 20px", cursor: media ? "pointer" : "not-allowed", fontWeight: 700, fontSize: "0.88rem" }}>
+            🤖 Analizza con AI
+          </button>
+          {stato === "pronto" && (
+            <button onClick={exportPDF}
+              style={{ background: "#14532d", color: "#86efac", border: "1px solid #22c55e55", borderRadius: 8, padding: "10px 20px", cursor: "pointer", fontWeight: 700, fontSize: "0.88rem" }}>
+              📄 Esporta Report HTML
+            </button>
+          )}
+        </div>
+      ) : (
+        <div style={{ color: "#7dd3fc", fontSize: "0.88rem", marginBottom: 20 }}>
+          {stato === "trascrizione" && "🎙 Trascrizione in corso…"}
+          {stato === "analisi" && "🤖 Analisi e organizzazione commenti…"}
+          {stato === "export" && "📄 Generazione report…"}
+        </div>
+      )}
+
+      {errore && <div style={{ color: "#fca5a5", fontSize: "0.82rem", marginBottom: 16 }}>⚠ {errore}</div>}
+
+      {/* AREA PRINCIPALE: planimetria + commenti */}
+      {stato === "pronto" && commenti.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: planimetria ? "1fr 380px" : "1fr", gap: 20 }}>
+
+          {/* PLANIMETRIA CON PIN */}
+          {planimetria && (
+            <div style={{ background: "#0c1a2e", border: "1px solid #1e3a5f", borderRadius: 12, padding: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                <div style={{ color: "#7dd3fc", fontWeight: 700, fontSize: "0.85rem" }}>📐 Planimetria</div>
+                <label style={{ display: "flex", alignItems: "center", gap: 5, color: "#64748b", fontSize: "0.75rem", cursor: "pointer" }}>
+                  <input type="checkbox" checked={mostraPin} onChange={e => setMostraPin(e.target.checked)} />
+                  Mostra pin
+                </label>
+              </div>
+              {pinAttivo && (
+                <div style={{ background: "#1e3a5f", color: "#7dd3fc", fontSize: "0.78rem", padding: "6px 12px", borderRadius: 6, marginBottom: 8 }}>
+                  👆 Clicca sulla planimetria per posizionare il commento #{pinAttivo}
+                </div>
+              )}
+              <div ref={planRef} onClick={handleClickPlanimetria}
+                style={{ position: "relative", cursor: pinAttivo ? "crosshair" : "default", userSelect: "none" }}>
+                {planimetria.tipo === "immagine"
+                  ? <img src={planimetria.url} style={{ width: "100%", borderRadius: 8, display: "block" }} alt="planimetria" />
+                  : <iframe src={planimetria.url} style={{ width: "100%", height: 500, border: "none", borderRadius: 8 }} title="planimetria" />
+                }
+                {mostraPin && commenti.filter(c => c.x !== null).map(c => (
+                  <div key={c.id} style={{
+                    position: "absolute",
+                    left: \`\${c.x}%\`, top: \`\${c.y}%\`,
+                    transform: "translate(-50%, -50%)",
+                    width: 28, height: 28, borderRadius: "50%",
+                    background: colPriorita(c.priorita),
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    color: "#fff", fontWeight: 700, fontSize: "0.75rem",
+                    boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+                    border: "2px solid #fff",
+                    cursor: "pointer",
+                    zIndex: 10,
+                    title: c.testo
+                  }}>
+                    {c.id}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* LISTA COMMENTI */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ color: "#7dd3fc", fontWeight: 700, fontSize: "0.85rem", marginBottom: 4 }}>
+              💬 Commenti ({commenti.length})
+            </div>
+            {commenti.map(c => (
+              <div key={c.id} style={{
+                background: "#0c1a2e",
+                border: \`1px solid \${pinAttivo === c.id ? colPriorita(c.priorita) : "#1e3a5f"}\`,
+                borderRadius: 10, padding: 12,
+                transition: "border-color 0.15s"
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                  <div style={{ width: 24, height: 24, borderRadius: "50%", background: colPriorita(c.priorita), display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 700, fontSize: "0.72rem", flexShrink: 0 }}>
+                    {c.id}
+                  </div>
+                  <div style={{ color: "#94a3b8", fontSize: "0.72rem", fontWeight: 600 }}>{c.area}</div>
+                  <div style={{ marginLeft: "auto", fontSize: "0.68rem", color: colPriorita(c.priorita), fontWeight: 700 }}>{c.priorita.toUpperCase()}</div>
+                </div>
+                <div style={{ color: "#e2e8f0", fontSize: "0.8rem", lineHeight: 1.4, marginBottom: 8 }}>{c.testo}</div>
+                {planimetria && (
+                  <button onClick={() => setPinAttivo(pinAttivo === c.id ? null : c.id)}
+                    style={{ background: pinAttivo === c.id ? colPriorita(c.priorita) : "#1e3a5f", color: "#fff", border: "none", borderRadius: 6, padding: "4px 10px", cursor: "pointer", fontSize: "0.72rem", fontWeight: 600 }}>
+                    {c.x !== null ? \`📍 Riposiziona\` : \`📍 Posiziona\`}
+                  </button>
+                )}
+                {c.x !== null && <span style={{ color: "#475569", fontSize: "0.68rem", marginLeft: 6 }}>posizionato ✓</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 const TABS_APERTURE = [
   { id:"scheda",   label:"📋 Scheda Negozio" },
   { id:"workflow", label:"✅ Workflow" },
@@ -4762,6 +4856,7 @@ const TABS_APERTURE = [
   { id:"crono",    label:"📅 Cronoprogramma" },
   { id:"ai",       label:"🤖 Analisi AI" },
   { id:"documenti",label:"📁 Documenti" },
+  { id:"sopralluogo",label:"🏪 Sopralluogo" },
 ];
 
 const TABS_GESTIONE = [
@@ -4984,6 +5079,7 @@ export default function App() {
         {tab==="attivita" && <TabAttivitaCommessa commessaIdGlobale={commessaIdGlobale} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="ai"       && <TabAnalisiAI />}
         {tab==="documenti"&& <TabDocumenti commessaIdGlobale={commessaIdGlobale} commesse={commesseFiltrateGlobali} commessaSelezionata={commessaSelezionataGlobale} />}
+        {tab==="sopralluogo" && <TabSopralluogo commessaIdGlobale={commessaIdGlobale} commessaSelezionata={commessaSelezionataGlobale} />}
         {tab==="progetti" && <TabProgetti />}
         {tab==="calendario" && <TabCalendario />}
       </div>
