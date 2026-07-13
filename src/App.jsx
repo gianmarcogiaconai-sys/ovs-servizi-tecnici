@@ -4550,20 +4550,22 @@ function TabSopralluogo({ commessaIdGlobale, commessaSelezionata }) {
 
       const mime = media.file.type || "audio/mp4";
 
-      const prompt = `Sei un assistente per la gestione di negozi retail. Ti viene fornita una registrazione audio/video di un sopralluogo in un punto vendita.
+      const prompt = `Sei un tecnico esperto in gestione di punti vendita retail e ristrutturazioni commerciali. Ti viene fornita una registrazione audio/video di un sopralluogo in un negozio.
 
-Trascrivi tutti i commenti e organizzali in una lista strutturata. Per ogni commento identifica:
-- Il testo del commento (trascritto fedelmente)
-- L'area del negozio a cui si riferisce (es: Ingresso, Cassa, Reparto abbigliamento donna, Magazzino, Vetrine, Area camerini, ecc.)
-- La priorità (alta/media/bassa) basandoti sul tono e contenuto
+Il tuo compito e' trascrivere e rielaborare professionalmente tutti i commenti espressi durante il sopralluogo.
+Per ogni osservazione:
+- Riformula il testo in modo tecnico e professionale (es. "facciamo la pittura blu" diventa "Verniciatura pareti con tinta blu RAL da definire")
+- Identifica l'area specifica del negozio
+- Assegna la categoria intervento: EDILE | IMPIANTI | ARREDO | VISUAL | MANUTENZIONE | NESSUN INTERVENTO
+- Assegna la priorita': alta (intervento urgente o strutturale) / media (intervento pianificabile) / bassa (cosmetico o invariato)
 
-Restituisci SOLO un array JSON valido, senza backtick né testo aggiuntivo, con questa struttura:
+Restituisci SOLO un array JSON valido, senza backtick ne testo aggiuntivo:
 [
-  { "id": 1, "testo": "commento trascritto", "area": "nome area", "priorita": "alta|media|bassa" },
+  { "id": 1, "testo": "descrizione tecnica professionale", "area": "nome area", "categoria": "EDILE|IMPIANTI|ARREDO|VISUAL|MANUTENZIONE|NESSUN INTERVENTO", "priorita": "alta|media|bassa" },
   ...
 ]
 
-Se non riesci a trascrivere chiaramente un commento, includilo comunque con una nota "[non chiaro]".`;
+Se un'osservazione indica di mantenere invariato qualcosa, includila con priorita' bassa e categoria NESSUN INTERVENTO.`;
 
       setStato("analisi");
 
@@ -4639,36 +4641,39 @@ Se non riesci a trascrivere chiaramente un commento, includilo comunque con una 
 
       // Genera HTML per il report
       const planImg = canvas.width > 0 ? canvas.toDataURL("image/png") : null;
-      const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
-<title>Sopralluogo - ${commessaSelezionata?.nome || "Commessa"}</title>
-<style>
-  body { font-family: Arial, sans-serif; margin: 32px; color: #1e293b; }
-  h1 { color: #1d4ed8; font-size: 22px; margin-bottom: 4px; }
-  h2 { color: #475569; font-size: 14px; font-weight: normal; margin-bottom: 24px; }
-  .planimetria { max-width: 100%; margin-bottom: 32px; border: 1px solid #e2e8f0; border-radius: 8px; }
-  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
-  th { background: #1d4ed8; color: #fff; padding: 10px 12px; text-align: left; font-size: 13px; }
-  td { padding: 10px 12px; border-bottom: 1px solid #e2e8f0; font-size: 13px; vertical-align: top; }
-  tr:nth-child(even) td { background: #f8fafc; }
-  .badge { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 11px; font-weight: bold; color: #fff; }
-  .alta { background: #ef4444; } .media { background: #f59e0b; } .bassa { background: #22c55e; }
-  .pin { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; color: #fff; font-weight: bold; font-size: 12px; }
-</style></head><body>
-<h1>📋 Report Sopralluogo — ${commessaSelezionata?.nome || "Commessa"}</h1>
-<h2>Generato il ${new Date().toLocaleString("it-IT")} · ${commenti.length} commenti rilevati</h2>
-${planImg ? `<img src="${planImg}" class="planimetria" />` : ""}
-<table>
-<thead><tr><th>#</th><th>Area</th><th>Commento</th><th>Priorità</th><th>Pin</th></tr></thead>
-<tbody>
-${commenti.map(c => `<tr>
-  <td><span class="pin" style="background:${colPriorita(c.priorita)}">${c.id}</span></td>
-  <td><strong>${c.area}</strong></td>
-  <td>${c.testo}</td>
-  <td><span class="badge ${c.priorita}">${c.priorita.toUpperCase()}</span></td>
-  <td>${c.x !== null ? `(${c.x}%, ${c.y}%)` : "—"}</td>
-</tr>`).join("")}
-</tbody></table>
-</body></html>`;
+      const nomeCommessa = commessaSelezionata?.nome || "Commessa";
+      const righeCommenti = commenti.map(function(c) {
+        var pin = c.x !== null ? "(" + c.x + "%, " + c.y + "%)" : "—";
+        return "<tr>" +
+          "<td><span class=\"pin\" style=\"background:" + colPriorita(c.priorita) + "\">" + c.id + "</span></td>" +
+          "<td><strong>" + c.area + "</strong></td>" +
+          "<td>" + c.testo + "</td>" +
+          "<td><span class=\"badge " + c.priorita + "\">" + c.priorita.toUpperCase() + "</span></td>" +
+          "<td>" + pin + "</td>" +
+          "</tr>";
+      }).join("");
+      const imgTag = planImg ? '<img src="' + planImg + '" class="planimetria" />' : "";
+      const html = "<!DOCTYPE html><html><head><meta charset=\"UTF-8\">" +
+        "<title>Sopralluogo - " + nomeCommessa + "</title>" +
+        "<style>" +
+        "body { font-family: Arial, sans-serif; margin: 32px; color: #1e293b; }" +
+        "h1 { color: #1d4ed8; font-size: 22px; margin-bottom: 4px; }" +
+        "h2 { color: #475569; font-size: 14px; font-weight: normal; margin-bottom: 24px; }" +
+        ".planimetria { max-width: 100%; margin-bottom: 32px; border: 1px solid #e2e8f0; border-radius: 8px; }" +
+        "table { width: 100%; border-collapse: collapse; margin-top: 16px; }" +
+        "th { background: #1d4ed8; color: #fff; padding: 10px 12px; text-align: left; font-size: 13px; }" +
+        "td { padding: 10px 12px; border-bottom: 1px solid #e2e8f0; font-size: 13px; vertical-align: top; }" +
+        "tr:nth-child(even) td { background: #f8fafc; }" +
+        ".badge { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 11px; font-weight: bold; color: #fff; }" +
+        ".alta { background: #ef4444; } .media { background: #f59e0b; } .bassa { background: #22c55e; }" +
+        ".pin { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; color: #fff; font-weight: bold; font-size: 12px; }" +
+        "</style></head><body>" +
+        "<h1>Report Sopralluogo - " + nomeCommessa + "</h1>" +
+        "<h2>Generato il " + new Date().toLocaleString("it-IT") + " - " + commenti.length + " commenti rilevati</h2>" +
+        imgTag +
+        "<table><thead><tr><th>#</th><th>Area</th><th>Commento</th><th>Priorita</th><th>Pin</th></tr></thead>" +
+        "<tbody>" + righeCommenti + "</tbody></table>" +
+        "</body></html>";
 
       const blob = new Blob([html], { type: "text/html" });
       const url = URL.createObjectURL(blob);
@@ -4688,6 +4693,11 @@ ${commenti.map(c => `<tr>
     const c = { "Ingresso": "#6366f1", "Cassa": "#f59e0b", "Magazzino": "#8b5cf6" };
     return c[area] || "#3b82f6";
   };
+  const colCategoria = (cat) => {
+    const c = { "EDILE": "#92400e", "IMPIANTI": "#1e40af", "ARREDO": "#5b21b6", "VISUAL": "#065f46", "MANUTENZIONE": "#9f1239", "NESSUN INTERVENTO": "#374151" };
+    return c[cat] || "#334155";
+  };
+
 
   return (
     <div style={{ color: "#e2e8f0" }}>
@@ -4826,14 +4836,15 @@ ${commenti.map(c => `<tr>
                   <div style={{ width: 24, height: 24, borderRadius: "50%", background: colPriorita(c.priorita), display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 700, fontSize: "0.72rem", flexShrink: 0 }}>
                     {c.id}
                   </div>
-                  <div style={{ color: "#94a3b8", fontSize: "0.72rem", fontWeight: 600 }}>{c.area}</div>
+                  <div style={{ color: "#94a3b8", fontSize: "0.72rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>{c.area}</div>
                   <div style={{ marginLeft: "auto", fontSize: "0.68rem", color: colPriorita(c.priorita), fontWeight: 700 }}>{c.priorita.toUpperCase()}</div>
                 </div>
-                <div style={{ color: "#e2e8f0", fontSize: "0.8rem", lineHeight: 1.4, marginBottom: 8 }}>{c.testo}</div>
+                <div style={{ color: "#e2e8f0", fontSize: "0.8rem", lineHeight: 1.5, marginBottom: 8 }}>{c.testo}</div>
+                {c.categoria && <div style={{ display:"inline-block", background: colCategoria(c.categoria), color:"#fff", fontSize:"0.65rem", fontWeight:700, padding:"2px 8px", borderRadius:4, marginBottom:8, letterSpacing:"0.05em" }}>{c.categoria}</div>}
                 {planimetria && (
                   <button onClick={() => setPinAttivo(pinAttivo === c.id ? null : c.id)}
                     style={{ background: pinAttivo === c.id ? colPriorita(c.priorita) : "#1e3a5f", color: "#fff", border: "none", borderRadius: 6, padding: "4px 10px", cursor: "pointer", fontSize: "0.72rem", fontWeight: 600 }}>
-                    {c.x !== null ? `📍 Riposiziona` : `📍 Posiziona`}
+                    {c.x !== null ? "📍 Riposiziona" : "📍 Posiziona"}
                   </button>
                 )}
                 {c.x !== null && <span style={{ color: "#475569", fontSize: "0.68rem", marginLeft: 6 }}>posizionato ✓</span>}
