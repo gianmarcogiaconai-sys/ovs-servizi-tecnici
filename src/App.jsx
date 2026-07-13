@@ -4568,7 +4568,7 @@ Se non riesci a trascrivere chiaramente un commento, includilo comunque con una 
       setStato("analisi");
 
       const res = await fetch(
-        \`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=\${apiKey}\`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${apiKey}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -4639,8 +4639,8 @@ Se non riesci a trascrivere chiaramente un commento, includilo comunque con una 
 
       // Genera HTML per il report
       const planImg = canvas.width > 0 ? canvas.toDataURL("image/png") : null;
-      const html = \`<!DOCTYPE html><html><head><meta charset="UTF-8">
-<title>Sopralluogo - \${commessaSelezionata?.nome || "Commessa"}</title>
+      const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>Sopralluogo - ${commessaSelezionata?.nome || "Commessa"}</title>
 <style>
   body { font-family: Arial, sans-serif; margin: 32px; color: #1e293b; }
   h1 { color: #1d4ed8; font-size: 22px; margin-bottom: 4px; }
@@ -4654,27 +4654,27 @@ Se non riesci a trascrivere chiaramente un commento, includilo comunque con una 
   .alta { background: #ef4444; } .media { background: #f59e0b; } .bassa { background: #22c55e; }
   .pin { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; color: #fff; font-weight: bold; font-size: 12px; }
 </style></head><body>
-<h1>📋 Report Sopralluogo — \${commessaSelezionata?.nome || "Commessa"}</h1>
-<h2>Generato il \${new Date().toLocaleString("it-IT")} · \${commenti.length} commenti rilevati</h2>
-\${planImg ? \`<img src="\${planImg}" class="planimetria" />\` : ""}
+<h1>📋 Report Sopralluogo — ${commessaSelezionata?.nome || "Commessa"}</h1>
+<h2>Generato il ${new Date().toLocaleString("it-IT")} · ${commenti.length} commenti rilevati</h2>
+${planImg ? `<img src="${planImg}" class="planimetria" />` : ""}
 <table>
 <thead><tr><th>#</th><th>Area</th><th>Commento</th><th>Priorità</th><th>Pin</th></tr></thead>
 <tbody>
-\${commenti.map(c => \`<tr>
-  <td><span class="pin" style="background:\${colPriorita(c.priorita)}">\${c.id}</span></td>
-  <td><strong>\${c.area}</strong></td>
-  <td>\${c.testo}</td>
-  <td><span class="badge \${c.priorita}">\${c.priorita.toUpperCase()}</span></td>
-  <td>\${c.x !== null ? \`(\${c.x}%, \${c.y}%)\` : "—"}</td>
-</tr>\`).join("")}
+${commenti.map(c => `<tr>
+  <td><span class="pin" style="background:${colPriorita(c.priorita)}">${c.id}</span></td>
+  <td><strong>${c.area}</strong></td>
+  <td>${c.testo}</td>
+  <td><span class="badge ${c.priorita}">${c.priorita.toUpperCase()}</span></td>
+  <td>${c.x !== null ? `(${c.x}%, ${c.y}%)` : "—"}</td>
+</tr>`).join("")}
 </tbody></table>
-</body></html>\`;
+</body></html>`;
 
       const blob = new Blob([html], { type: "text/html" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = \`Sopralluogo_\${commessaSelezionata?.nome || "commessa"}_\${new Date().toISOString().slice(0,10)}.html\`;
+      a.download = `Sopralluogo_${commessaSelezionata?.nome || "commessa"}_${new Date().toISOString().slice(0,10)}.html`;
       a.click();
       URL.revokeObjectURL(url);
       setStato("pronto");
@@ -4791,7 +4791,7 @@ Se non riesci a trascrivere chiaramente un commento, includilo comunque con una 
                 {mostraPin && commenti.filter(c => c.x !== null).map(c => (
                   <div key={c.id} style={{
                     position: "absolute",
-                    left: \`\${c.x}%\`, top: \`\${c.y}%\`,
+                    left: `${c.x}%`, top: `${c.y}%`,
                     transform: "translate(-50%, -50%)",
                     width: 28, height: 28, borderRadius: "50%",
                     background: colPriorita(c.priorita),
@@ -4818,7 +4818,7 @@ Se non riesci a trascrivere chiaramente un commento, includilo comunque con una 
             {commenti.map(c => (
               <div key={c.id} style={{
                 background: "#0c1a2e",
-                border: \`1px solid \${pinAttivo === c.id ? colPriorita(c.priorita) : "#1e3a5f"}\`,
+                border: `1px solid ${pinAttivo === c.id ? colPriorita(c.priorita) : "#1e3a5f"}`,
                 borderRadius: 10, padding: 12,
                 transition: "border-color 0.15s"
               }}>
@@ -4833,7 +4833,7 @@ Se non riesci a trascrivere chiaramente un commento, includilo comunque con una 
                 {planimetria && (
                   <button onClick={() => setPinAttivo(pinAttivo === c.id ? null : c.id)}
                     style={{ background: pinAttivo === c.id ? colPriorita(c.priorita) : "#1e3a5f", color: "#fff", border: "none", borderRadius: 6, padding: "4px 10px", cursor: "pointer", fontSize: "0.72rem", fontWeight: 600 }}>
-                    {c.x !== null ? \`📍 Riposiziona\` : \`📍 Posiziona\`}
+                    {c.x !== null ? `📍 Riposiziona` : `📍 Posiziona`}
                   </button>
                 )}
                 {c.x !== null && <span style={{ color: "#475569", fontSize: "0.68rem", marginLeft: 6 }}>posizionato ✓</span>}
